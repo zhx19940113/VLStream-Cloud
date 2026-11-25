@@ -4,6 +4,8 @@
 
 业务主线：设备初始化并上线 → WVP 提供设备与视频能力；算法与数据集 → 标注及固定训练包 → 训练和归档 → 按硬件转换、下发 → 设备事件 → 可选视觉复核 → 事件处置及可选工单。
 
+后续开发优先级、依赖和验收用例见[业务闭环开发任务计划](docs/BUSINESS_CLOSURE_PLAN.md)。
+
 新增或改变业务时，在对应章节维护入口、角色、系统边界、前置条件、状态、数据所有权、失败处理和验证边界；详细过程放专项记录，避免将本文件变成部署日志。不得记录密码、密钥、Token、Cookie 或完整签名 URL。数据库变更必须新增 Flyway 迁移，遵循 [数据库迁移说明](VLStream-Cloud-Backend-Server/vls-stream/DATABASE_MIGRATIONS.md)。训练、转换、Hi3519DV500、模型下发及 GPU 调度还须先阅读本地忽略文件 `codex/VLSTREAM_AI_TRAINING_CONTEXT.md`。
 
 ## 1. 产品和身份边界
