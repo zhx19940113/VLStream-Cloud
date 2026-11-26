@@ -84,6 +84,11 @@ public class ApprovalListeners implements TaskListener , ApplicationContextAware
             return;
         }
 
+        // Local work orders are reconciled against committed process history after the
+        // entire instance ends. A task-level approval can be an intermediate decision.
+        if (LocationTaskWorkflowCallbackService.supports(requestUrlValue)) {
+            return;
+        }
         Gson gson = new Gson();
         List<HeaderOrParams> headerList = null;
         List<HeaderOrParams> paramsList = null;
@@ -115,12 +120,6 @@ public class ApprovalListeners implements TaskListener , ApplicationContextAware
             .singleResult();
         // Execute operation
         try {
-            LocationTaskWorkflowCallbackService locationTaskCallback =
-                applicationContext.getBean(LocationTaskWorkflowCallbackService.class);
-            if (locationTaskCallback.supports(requestUrlValue)) {
-                locationTaskCallback.handleApprovedTask(delegateTask, historicProcIns);
-                return;
-            }
             switch (requestMethodValue.toUpperCase()) {
                 case "GET":
                 case "DELETE":

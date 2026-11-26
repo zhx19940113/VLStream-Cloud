@@ -37,6 +37,11 @@ public interface EventReportOutboxMapper extends BaseMapper<EventReportOutbox> {
 		+ "AND locked_by = #{workerId} ORDER BY locked_at, id")
 	List<EventReportOutbox> selectClaimed(@Param("workerId") String workerId);
 
+	@Select("SELECT COUNT(*) FROM vls_event_report_outbox WHERE id = #{id} AND tenant_id = #{tenantId} "
+		+ "AND status = 'PROCESSING' AND locked_by = #{workerId} AND locked_at > #{staleBefore}")
+	int countOwned(@Param("id") Long id, @Param("tenantId") String tenantId,
+				   @Param("workerId") String workerId, @Param("staleBefore") Date staleBefore);
+
 	@Update("UPDATE vls_event_report_outbox SET status = 'SUCCESS', reported_at = #{now}, "
 		+ "last_error = NULL, locked_by = NULL, locked_at = NULL, update_time = #{now} "
 		+ "WHERE id = #{id} AND tenant_id = #{tenantId} AND status = 'PROCESSING' "

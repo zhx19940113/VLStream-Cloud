@@ -120,7 +120,7 @@
             <div v-if="scope.row.trainStatus === '训练完成'" class="model-metrics">
               <div class="metric-item">
                 <span class="metric-label">mapValue:</span>
-                <span class="metric-value">{{ scope.row.mapValue }}</span>
+                <span class="metric-value">{{ metricText(scope.row.mAP) }}</span>
                 <el-icon class="info-icon"><QuestionFilled /></el-icon>
               </div>
               <div class="metric-item">
@@ -697,7 +697,9 @@
             </div>
           </div>
           <div class="terminal-content" ref="terminalRef">
-            <div class="terminal-output" v-html="terminalOutput"></div>
+            <div class="terminal-output">
+              <div v-for="(line, index) in terminalLines" :key="index" :class="['terminal-line', line.className]">{{ line.text }}</div>
+            </div>
             <div class="terminal-input-line">
               <span class="terminal-prompt">{{ $tp('提示') }}</span>
               <div class="terminal-input disabled-hint">{{ $tp('终端仅展示后台日志，命令输入已关闭') }}</div>
@@ -1127,6 +1129,7 @@ import selectDatasetIcon from '@/assets/select-dataset@3x.png'
 import evaluateIcon from '@/assets/validation@3x.png'
 import publishModelIcon from '@/assets/publish-model@3x.png'
 import { captureComputeIdentity } from '@/utils/computeIdentityRequest'
+import { incrementalTail, boundWindow } from '@/utils/trainingLogTail.mjs'
 import { getLocalSessionToken } from '@/utils/request'
 import SHA256 from 'crypto-js/sha256'
 import { requireComputePlatformAuthorization, isComputeAuthorizationCurrent, bindComputeDraftToActor, canRestoreComputeDraft } from '@/utils/computePlatformAuth'
@@ -1335,7 +1338,6 @@ const editingTrainingItem = ref(null)
 
 // SSH relateddata
 const sshConnected = ref(true)
-const terminalOutput = ref('')
 const currentCommand = ref('')
 const terminalRef = ref(null)
 const logPollingTimer = ref(null)
@@ -1345,8 +1347,24 @@ const finalizingTrainingTasks = new Set()
 const MODEL_CONVERSION_MAX_POLLS = 900
 const lastLogContent = ref('')
 const lastLogCount = ref(0)
+// Isolation for the log/status polls: one ticket per (task, open). A response whose ticket or
+// task no longer matches belongs to a closed or replaced dialog and is discarded.
+const logPollingTicket = ref(0)
+const statusPollingTicket = ref(0)
+const trainingDialogTaskId = ref(null)
+const lastSnapshotLines = ref([])
+const lastLogLinesMerged = ref(0)
 const lastModelPath = ref('')
 const lastLogPath = ref('')
+
+// Bounded plain-text window. The previous markup string grew without limit, and a rolling
+// `tail -n` snapshot that moved by one line re-appended the whole overlap on every poll.
+const TERMINAL_WINDOW_LINES = 500
+const terminalLines = ref([])
+const pushTerminalLine = (text, className = '') => {
+  const line = { text: String(text), className }
+  terminalLines.value = boundWindow(terminalLines.value.concat(line), TERMINAL_WINDOW_LINES)
+}
 
 // form
 const addFormRules = {
@@ -1594,7 +1612,7 @@ const handleTrain = async (row) => {
   lastLogContent.value = ''
   lastModelPath.value = ''
   lastLogPath.value = ''
-  terminalOutput.value = ''
+  terminalLines.value = []
 
   // null / empty dataset - new training from null / empty configurationstart
   selectedDatasets.value = []
@@ -1787,7 +1805,7 @@ const handleBackToList = () => {
   currentTrainingItem.value = null
   selectedDatasets.value = []
   selectedDatasetIds.value = []
-  terminalOutput.value = ''
+  terminalLines.value = []
   loadTrainingData()
 }
 
@@ -2111,9 +2129,9 @@ const handleDownloadModel = async (row) => {
     ElMessage.success(uiText('下载模型成功: {value0}', { value0: modelFileName }))
 
     if (sshConnected.value) {
-      terminalOutput.value += `<div class="terminal-line"><span class="terminal-success">Downloading model: ${modelFileName}</span></div>`
-      terminalOutput.value += `<div class="terminal-line"><span class="terminal-info">Model type: ${downloadType}</span></div>`
-      terminalOutput.value += `<div class="terminal-line"><span class="terminal-info">Training ID: ${trainingId}</span></div>`
+      pushTerminalLine(`Downloading model: ${modelFileName}`, 'terminal-success')
+      pushTerminalLine(`Model type: ${downloadType}`, 'terminal-info')
+      pushTerminalLine(`Training ID: ${trainingId}`, 'terminal-info')
       scrollToBottom()
     }
   } catch (error) {
@@ -2172,12 +2190,12 @@ const handleRetrainModel = async (row) => {
 
     // in SSH new traininginfo
     if (sshConnected.value) {
-      terminalOutput.value += `<div class="terminal-line"><span class="terminal-info">[INFO]</span> 🔄 重新训练任务: ${originalData.taskName}</div>`
-      terminalOutput.value += `<div class="terminal-line"><span class="terminal-info">[INFO]</span> 📋 已加载原始训练配置</div>`
+      pushTerminalLine('[INFO] 重新训练任务: ' + originalData.taskName, 'terminal-info')
+      pushTerminalLine('[INFO] 已加载原始训练配置', 'terminal-info')
       if (originalData.datasetId) {
-        terminalOutput.value += `<div class="terminal-line"><span class="terminal-info">[INFO]</span> 📊 已恢复数据集选择</div>`
+        pushTerminalLine('[INFO] 已恢复数据集选择', 'terminal-info')
       }
-      terminalOutput.value += `<div class="terminal-line"><span class="terminal-success">[SUCCESS]</span> ✅ 配置页面已打开，可以查看和修改配置</div>`
+      pushTerminalLine('[SUCCESS] 配置页面已打开，可以查看和修改配置', 'terminal-success')
       scrollToBottom()
     }
 
@@ -2343,6 +2361,15 @@ const handleDeleteTraining = async (row) => {
   }
 }
 
+// Training metrics: normalize once so a real 0 stays "0.0%" and only a missing value is blank.
+const metricPercent = (value) => {
+  if (value === null || value === undefined || value === '') return null
+  const number = Number(value)
+  return Number.isFinite(number) ? (number * 100).toFixed(1) + '%' : null
+}
+
+const metricText = (value, placeholder = '-') => (value === null || value === undefined || value === '') ? placeholder : value
+
 const handleSizeChange = (val) => {
   pageSize.value = val
   currentPage.value = 1
@@ -2385,9 +2412,9 @@ const loadTrainingData = async () => {
         targetModel: item.targetModel,
         trainAlgorithm: item.algorithmName || '-',
         trainStatus: getTrainStatusText(item.trainStatus),
-        mAP: item.mapValue ? `${(item.mapValue * 100).toFixed(1)}%` : null,
-        precision: item.precisionValue ? `${(item.precisionValue * 100).toFixed(1)}%` : null,
-        recall: item.recallValue ? `${(item.recallValue * 100).toFixed(1)}%` : null,
+        mAP: metricPercent(item.mapValue),
+        precision: metricPercent(item.precisionValue),
+        recall: metricPercent(item.recallValue),
         correspondingModel: null,
         originalData: item
       }))
@@ -2441,7 +2468,7 @@ const executionStatusText = row => {
 }
 
 const appendTerminalInfo = (message) => {
-  terminalOutput.value += `<div class="terminal-line"><span class="terminal-info">[INFO]</span> ${message}</div>`
+  pushTerminalLine(`[INFO] ${message}`, 'terminal-info')
   scrollToBottom()
 }
 
@@ -2483,16 +2510,18 @@ const detectStatusFromLogs = (logContent) => {
   return null
 }
 
+// Terminal states are the server's own status codes. Localised display strings are never
+// compared here: the backend maps a confirmed cancel to `stop`, and a translated label must
+// not be able to keep (or prematurely end) either poll.
+const TERMINAL_TRAINING_STATES = new Set(['completed', 'failed', 'stop', 'stopped'])
 const isFinishedStatus = (statusValue) => {
-  if (!statusValue) return false
-  const normalized = String(statusValue)
-  return ['completed', 'failed', 'stopped', '\u8bad\u7ec3\u5b8c\u6210', '\u8bad\u7ec3\u5931\u8d25', '\u8bad\u7ec3\u7ec8\u6b62'].includes(normalized)
+  if (statusValue === null || statusValue === undefined || statusValue === true || statusValue === false) return false
+  return TERMINAL_TRAINING_STATES.has(String(statusValue).trim())
 }
 
 const isCompletedStatus = (statusValue) => {
-  if (!statusValue) return false
-  const normalized = String(statusValue)
-  return ['completed', '\u8bad\u7ec3\u5b8c\u6210'].includes(normalized)
+  if (statusValue === null || statusValue === undefined) return false
+  return String(statusValue).trim() === 'completed'
 }
 
 const resolveAutoPublishItem = (taskId) => {
@@ -2506,7 +2535,7 @@ const resolveAutoPublishItem = (taskId) => {
 }
 
 // traininglog and
-const appendLogLines = (logData) => {
+const appendSnapshot = (logData) => {
   if (logData === undefined || logData === null) return
   const raw = Array.isArray(logData) ? logData.join('\n') : String(logData)
   if (!raw.trim()) return
@@ -2514,26 +2543,33 @@ const appendLogLines = (logData) => {
   content = content.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '')
   if (!content.trim()) return
 
-  let newContent = content
-  if (lastLogContent.value && content.startsWith(lastLogContent.value)) {
-    newContent = content.slice(lastLogContent.value.length)
+  const incoming = content.split('\n')
+  if (incoming.length && incoming[incoming.length - 1] === '') {
+    incoming.pop()
   }
+  const previous = lastSnapshotLines.value
+  const appended = incrementalTail(previous, incoming)
 
+  lastSnapshotLines.value = incoming
+  lastLogLinesMerged.value += appended.length
   lastLogContent.value = content
-  const lines = newContent.split('\n')
-  if (lines.length && lines[lines.length - 1] === '') {
-    lines.pop()
-  }
-  lastLogCount.value = lines.length
-  if (!lines.length) return
+  lastLogCount.value = appended.length
+  if (!appended.length) return
 
-  lines.forEach(line => {
-    terminalOutput.value += `<div class=\"terminal-line\">${line}</div>`
-  })
+  appended.forEach(line => pushTerminalLine(line))
   scrollToBottom()
 }
 
+// Local notices are printed as-is and never treated as a remote snapshot: storing them as the
+// baseline would make the next real tail look "new" and duplicate its overlap.
+const appendLogLines = (text) => {
+  String(text).split('\n').forEach(line => pushTerminalLine(line))
+  scrollToBottom()
+}
+
+// Advancing a ticket also invalidates replies already on the wire, not just the next tick.
 const stopLogPolling = () => {
+  logPollingTicket.value++
   if (logPollingTimer.value) {
     clearInterval(logPollingTimer.value)
     logPollingTimer.value = null
@@ -2541,6 +2577,7 @@ const stopLogPolling = () => {
 }
 
 const stopStatusPolling = () => {
+  statusPollingTicket.value++
   if (statusPollingTimer.value) {
     clearInterval(statusPollingTimer.value)
     statusPollingTimer.value = null
@@ -2631,7 +2668,7 @@ const handleTrainingFinished = async (taskId, statusValue) => {
 
   const displayStatus = getTrainStatusText(statusValue)
   appendTerminalInfo(`训练状态: ${displayStatus}`)
-  if (!isCompletedStatus(statusValue) && !isCompletedStatus(displayStatus)) {
+  if (!isCompletedStatus(statusValue)) {
     await loadTrainingData()
     return
   }
@@ -2654,21 +2691,32 @@ const handleTrainingFinished = async (taskId, statusValue) => {
 
 const startLogPolling = (taskId) => {
   stopLogPolling()
+  // Clearing a timer cannot cancel a request already on the wire. Every iteration carries the
+  // task plus this open's ticket, and a late reply for replaceable task A is dropped before it can
+  // touch the terminal or stop task B's poll.
+  trainingDialogTaskId.value = taskId
+  const ticket = ++logPollingTicket.value
+  let inFlight = false
   lastLogContent.value = ''
   lastLogCount.value = 0
+  lastSnapshotLines.value = []
+  lastLogLinesMerged.value = 0
   const fetchOnce = async () => {
+    if (inFlight || ticket !== logPollingTicket.value || taskId !== trainingDialogTaskId.value) return
+    inFlight = true
     try {
       const res = await getTrainingLogs(taskId)
+      if (ticket !== logPollingTicket.value || taskId !== trainingDialogTaskId.value) return
       const payload = res?.data ?? res
       const data = payload?.data ?? payload
       const logs = data?.logContent ?? data?.data ?? data
       const statusValue = data?.status ?? data?.trainStatus ?? payload?.status ?? payload?.trainStatus
       const completedFlag = data?.completed ?? payload?.completed
+      const detectedStatus = detectStatusFromLogs(logs)
+      appendSnapshot(logs)
       const modelPath = data?.modelOutputPath ?? data?.modelPath ?? data?.modelFilePath ?? payload?.modelOutputPath ?? payload?.modelPath ?? payload?.modelFilePath
       const logPath = data?.logPath ?? data?.logFilePath ?? data?.logFile ?? payload?.logPath ?? payload?.logFilePath ?? payload?.logFile
-      appendLogLines(logs)
 
-      const detectedStatus = detectStatusFromLogs(logs)
       let resolvedStatus = statusValue
       if (completedFlag === true) {
         resolvedStatus = 'completed'
@@ -2692,6 +2740,8 @@ const startLogPolling = (taskId) => {
       // loginterface , before
     } catch (error) {
       console.error('拉取训练日志失败:', error)
+    } finally {
+      inFlight = false
     }
   }
   fetchOnce()
@@ -2700,10 +2750,16 @@ const startLogPolling = (taskId) => {
 
 const startStatusPolling = (taskId) => {
   stopStatusPolling()
+  const ticket = ++statusPollingTicket.value
+  trainingDialogTaskId.value = taskId
+  let inFlight = false
   let lastStatusMessage = ''
-  statusPollingTimer.value = setInterval(async () => {
+  const poll = async () => {
+    if (inFlight || ticket !== statusPollingTicket.value || taskId !== trainingDialogTaskId.value) return
+    inFlight = true
     try {
       const res = await getTrainingStatus(taskId)
+      if (ticket !== statusPollingTicket.value || taskId !== trainingDialogTaskId.value) return
       const payload = res?.data ?? res
       let statusValue = payload?.status ?? payload?.trainStatus ?? payload?.completed ?? payload
       if (statusValue === true) {
@@ -2722,18 +2778,28 @@ const startStatusPolling = (taskId) => {
         tableItem.trainStatus = displayStatus
       }
 
-      if (isFinishedStatus(statusValue) || isFinishedStatus(displayStatus)) {
+      // Only the server status code decides termination; `displayStatus` is a localised label.
+      if (isFinishedStatus(statusValue)) {
 		await handleTrainingFinished(taskId, statusValue)
       }
     } catch (error) {
       console.error('Failed to fetch training status:', error)
+    } finally {
+      inFlight = false
     }
-  }, 3000)
+  }
+  statusPollingTimer.value = setInterval(poll, 3000)
+  poll()
 }
 
 // log+
 const startPollingForTask = (taskId, tip = true) => {
   if (!taskId) return
+  // A fresh dialog open: advance the ticket so the previous dialog's taps in flight cannot return.
+  logPollingTicket.value++
+  trainingDialogTaskId.value = taskId
+  lastSnapshotLines.value = []
+  lastLogLinesMerged.value = 0
   if (tip) {
     appendLogLines(`[INFO] 开始监听训练任务 ${taskId} 的日志...`)
   }
@@ -2820,7 +2886,7 @@ const disconnectSSH = () => {
 }
 
 const clearTerminal = () => {
-  terminalOutput.value = ''
+  terminalLines.value = []
 }
 
 const executeCommand = () => {
@@ -2956,7 +3022,7 @@ const onTrainingIdentityChanged = () => {
   currentValidationItem.value = null; currentDeployItem.value = null
   showTrainingConfig.value = false; showVersionConfig.value = false; showValidationView.value = false
   showDeployDialog.value = false; showAddDialog.value = false; showEditDialog.value = false; showDatasetSelector.value = false
-  terminalOutput.value = ''; publicationState.value = ''; trainingBackendReady.value = false
+  terminalLines.value = []; lastSnapshotLines.value = []; publicationState.value = ''; trainingBackendReady.value = false
   isTraining.value = false; finalizingTrainingTasks.clear()
   selectedDatasets.value = []; selectedDatasetIds.value = []
   loadTrainingData()

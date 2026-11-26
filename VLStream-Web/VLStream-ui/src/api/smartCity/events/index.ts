@@ -80,6 +80,10 @@ export function addWorkOrderFeedback(data, identity, assertCurrent) {
 export function eventDetail(data) {
   return commonFuncB('task/v1/event_info', data, 'post')
 }
+
+export function retryEventDispatch(data) {
+  return commonFuncB('task/v1/event_dispatch_retry', data, 'post')
+}
 // taskevent
 export function feedbackList(data) {
   return commonFuncB('task/v1/event_back_list', data, 'post')

@@ -11,7 +11,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const ui = path.join(root, 'VLStream-Web/VLStream-ui')
 const requireUi = createRequire(path.join(ui, 'package.json'))
-const { parse, compileTemplate } = requireUi('@vue/compiler-sfc')
+const { parse, compileTemplate } = requireUi('vue/compiler-sfc')
 const { transformSync } = requireUi('esbuild')
 const source = readFileSync(path.join(ui, 'src/views/events/page/eventManagement/secure.vue'), 'utf8')
 const { descriptor } = parse(source)
@@ -26,6 +26,8 @@ const renderSource = template.code.replace(/import \{([\s\S]*?)\} from "vue"/, (
 const render = transformSync(renderSource, { loader: 'ts', target: 'es2020' }).code
 const serialize = value => JSON.stringify(value).replace(/</g, '\\u003c')
 const assets = {
+  '/eventColumns.mjs': './src/views/events/page/eventManagement/components/eventColumns.mjs',
+  '/eventVideos.mjs': './src/views/events/page/eventManagement/components/eventVideos.mjs',
   '/vue.js': 'vue/dist/vue.global.js',
   '/element.js': 'element-plus/dist/index.full.js',
   '/element.css': 'element-plus/dist/index.css',
@@ -33,19 +35,23 @@ const assets = {
 }
 const html = `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><link rel="stylesheet" href="/element.css">
 <style>body{margin:20px;font-family:sans-serif}.eventImg{width:48px;height:48px}.device-table-panel{width:100%}.tabs-btn{margin:12px 0}.paginationBox{margin-top:18px}</style>
-<div id="app"></div><script src="/vue.js"></script><script src="/element.js"></script><script src="/dayjs.js"></script><script>
+<div id="app"></div><script src="/vue.js"></script><script src="/element.js"></script><script src="/dayjs.js"></script><script type="module">
+import { normalizeEventColumns } from '/eventColumns.mjs';
+import { hasEventVideoReferences } from '/eventVideos.mjs';
 const picture = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48"><rect width="48" height="48" fill="steelblue"/></svg>');
 const row=(id)=>({id,uuid:'same-camera-owner',created_at:'2026-10-15 12:00:00',status:2,point:{address:'合成测试位置'},item:'synthetic_event',pics:[picture],device_name:'Synthetic Camera',device_id:'synthetic-device',describe:'仅测试数据'});
 const fixture=window.fixture={rows:[row('page1-a'),row('page1-b'),row('page1-c'),row('page2-a')],deletions:[],outcomes:{},messages:[],confirm:'accept',calls:[],pending:[]};
 const translate=(text,params)=>text.replace(/\\{(\\w+)\\}/g,(match,key)=>params&&key in params?String(params[key]):match);
 const eventList=async(data)=>{fixture.calls.push({...data});if(fixture.defer){return new Promise(resolve=>fixture.pending.push({data:{...data},resolve}));}return {code:200,data:{list:fixture.rows.filter(r=>r.id.startsWith(data.page===2?'page2':'page1')),count:20}}};
 const delEvent=async({id})=>{fixture.deletions.push(id);const result=fixture.outcomes[id];if(result==='network')throw new Error('synthetic network failure');if(result==='business')return {code:5003,msg:'synthetic business failure'};fixture.rows=fixture.rows.filter(r=>r.id!==id);return {code:200}};
-const bindings={ref:Vue.ref,reactive:Vue.reactive,onMounted:Vue.onMounted,uiText:translate,translatePhrase:translate,
+const bindings={ref:Vue.ref,reactive:Vue.reactive,computed:Vue.computed,watch:Vue.watch,onUnmounted:Vue.onUnmounted,
+normalizeEventColumns,hasEventVideoReferences,useRoute:()=>({query:{}}),useRouter:()=>({}),
+onMounted:Vue.onMounted,uiText:translate,translatePhrase:translate,
 ElMessage:Object.fromEntries(['success','warning','error'].map(type=>[type,text=>{fixture.messages.push({type,text});ElementPlus.ElMessage[type](text)}])),
 ElMessageBox:{confirm:()=>fixture.confirm==='cancel'?Promise.reject('cancel'):fixture.confirm==='pending'?new Promise(resolve=>fixture.confirmResolve=resolve):Promise.resolve()},
 getClassificationDeviceIds:async()=>({data:[]}),delEvent,eventList,event_item_list:async()=>({code:200,data:{list:[]}}),
 clacPXToVW:v=>v,useUserStore:()=>({token:'synthetic-token',userInfo:{}}),covertCurrentLocationURL:v=>v,dayjs};
-const runSetup=new Function(...Object.keys(bindings),${serialize(script + '\nreturn {covertCurrentLocationURL,clacPXToVW,' + names.join(',') + '}')});
+const runSetup=new Function(...Object.keys(bindings),${serialize(script + '\nreturn {covertCurrentLocationURL,clacPXToVW,hasEventVideoReferences,' + names.join(',') + '}')});
 const renderPage=new Function('Vue',${serialize(render + '\nreturn render')})(Vue);
 const app=Vue.createApp({render:renderPage,setup(){const state=runSetup(...Object.values(bindings));fixture.state=state;return state;}});
 app.use(ElementPlus);app.config.globalProperties.$tp=translate;

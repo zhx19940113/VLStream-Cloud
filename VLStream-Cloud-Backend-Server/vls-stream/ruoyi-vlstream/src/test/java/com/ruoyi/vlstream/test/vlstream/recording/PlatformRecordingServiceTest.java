@@ -78,4 +78,32 @@ class PlatformRecordingServiceTest {
         assertThrows(ServiceException.class, () -> service.recording("ONVIF", "29"));
         verify(jdbc, times(2)).queryForObject(sql, Integer.class, "tenant-a", "ONVIF", "29");
     }
+
+    @Test void playbackWindowFollowsTheSourceRetentionPolicy() {
+        Map<String,Object> thirty = new HashMap<>(); thirty.put("protocol", "VLSTREAM");
+        thirty.put("device_row_id", "1"); thirty.put("retention_days", 30);
+        Map<String,Object> permanent = new HashMap<>(); permanent.put("protocol", "VLSTREAM");
+        permanent.put("device_row_id", "1"); permanent.put("retention_days", 0);
+        String ownedSql = "SELECT * FROM vls_platform_record_source WHERE id=? AND tenant_id=?";
+        when(jdbc.queryForList(ownedSql, "source-a", "tenant-a"))
+            .thenReturn(Collections.singletonList(thirty))
+            .thenReturn(Collections.singletonList(permanent));
+        when(jdbc.queryForList(contains("FROM vls_platform_record_segment"), eq("source-a"), any(), any()))
+            .thenReturn(Collections.emptyList());
+
+        // Forty days back: outside a 30-day policy, inside permanent retention.
+        String date = java.time.LocalDate.now(java.time.ZoneId.of("Asia/Shanghai")).minusDays(40).toString();
+        long dayStart = java.time.LocalDate.parse(date)
+            .atStartOfDay(java.time.ZoneId.of("Asia/Shanghai")).toInstant().toEpochMilli();
+        service.segments("source-a", date);
+        service.segments("source-a", date);
+
+        org.mockito.ArgumentCaptor<Object> retained = org.mockito.ArgumentCaptor.forClass(Object.class);
+        org.mockito.Mockito.verify(jdbc, org.mockito.Mockito.times(2))
+            .queryForList(contains("FROM vls_platform_record_segment"), eq("source-a"), retained.capture(), any());
+        // A 30-day policy clamps the lower bound to "now - 30 days", i.e. after the requested day.
+        assertTrue(((Number) retained.getAllValues().get(0)).longValue() > dayStart);
+        // Permanent retention keeps the requested day's own bounds instead of a seven-day window.
+        assertEquals(dayStart, ((Number) retained.getAllValues().get(1)).longValue());
+    }
 }

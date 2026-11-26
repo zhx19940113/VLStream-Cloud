@@ -276,7 +276,9 @@ public class WfTaskServiceImpl extends FlowServiceFactory implements IWfTaskServ
                 String localScopeValue = ModelUtils.getUserTaskAttributeValue(bpmnModel, task.getTaskDefinitionKey(),
                         ProcessConstants.PROCESS_FORM_LOCAL_SCOPE);
                 boolean localScope = Convert.toBool(localScopeValue, false);
-                taskService.complete(taskBo.getTaskId(), taskBo.getVariables(), localScope);
+                Map<String, Object> formVariables = new HashMap<>(taskBo.getVariables());
+                formVariables.remove(ProcessConstants.PROCESS_STATUS_KEY);
+                taskService.complete(taskBo.getTaskId(), formVariables, localScope);
             } else {
                 taskService.complete(taskBo.getTaskId());
             }

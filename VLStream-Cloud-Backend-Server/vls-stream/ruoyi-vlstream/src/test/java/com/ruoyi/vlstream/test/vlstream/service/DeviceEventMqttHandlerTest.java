@@ -195,6 +195,23 @@ class DeviceEventMqttHandlerTest {
 	}
 
 	@Test
+	void acknowledgesOriginalMediaWhenAnotherWriterWinsAfterTheDuplicateCheck() {
+		DeviceInfo device = new DeviceInfo();
+		device.setDeviceId("CAM-1");
+		device.setTenantId("000000");
+		when(wvpDeviceResolver.resolve("CAM-1")).thenReturn(device);
+		when(mediaUploadService.validateAndBind(any(), any(), any(), any(), any()))
+			.thenReturn(new DeviceMediaUpload());
+		when(activeSafetyEventReportService.report(any())).thenReturn(ActiveSafetyEventReportResult.builder()
+			.activeSafetyEventId("winner").mediaId("winner-media").duplicate(true).build());
+
+		JSONObject reply = handler.handle(eventMessage());
+
+		assertEquals("SUCCESS", reply.getByPath("payload.bizData.status"));
+		assertEquals("winner-media", reply.getByPath("payload.bizData.mediaId"));
+	}
+
+	@Test
 	void storesExternalEventDataWithoutInventingAnUpload() {
 		mediaProperties.setAllowExternalEventMedia(true);
 		DeviceInfo device = new DeviceInfo();

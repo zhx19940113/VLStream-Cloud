@@ -218,7 +218,7 @@
         </el-menu>
         <div class="feedbacklist">
           <FeedbackRecord v-if="activeIndex === '1'" :feedback-list-data="feedbackListData" />
-          <WorkOrderRecord v-if="activeIndex === '2'" :item="eventDetailData" />
+          <EventWorkOrders v-if="activeIndex === '2'" :item="eventDetailData" @refresh="getEventDetail()" />
         </div>
       </div>
     </div>
@@ -239,13 +239,15 @@ import EventRecordedVideos from '../EventRecordedVideos.vue'
 import MultiImageUpload from '../multiImageUpload.vue'
 import CommonExpressions from '@/components/commonExpressions.vue'
 import FeedbackRecord from '../eventDetailsDialog/feedbackRecord.vue'
-import WorkOrderRecord from '../eventDetailsDialog/workOrderRecord.vue'
-import { eventDetail, addFeedback, feedbackList } from '@/api/smartCity/events'
+import EventWorkOrders from '../eventDetailsDialog/EventWorkOrders.vue'
+import { eventDetail, addFeedback, addWorkOrderFeedback, feedbackList } from '@/api/smartCity/events'
+import { AuthManager } from '@/utils/auth'
 import { useUserStore } from '@/store/modules/useraPaas'
 // const eventImg = new URL('@/assets/img/temporaryImg.jpg', import.meta.url).href
 import { ElMessage } from 'element-plus'
 import FlowForm from '@/pages/events/views/page/eventManagement/components/flowForm.vue'
 const store = useUserStore()
+const auth = new AuthManager()
 const activeIndex = ref('1')
 const flowFormRef = ref()
 interface Props {
@@ -360,6 +362,15 @@ const formRules = ref({
 
 // event
 const addFeedbackForm = async() => {
+  const generation = detailGeneration
+  const id = props.data?.id
+  const identity = auth.getIdentitySnapshot()
+  const detailIdentity = currentDetailIdentity()
+  const assertCurrent = () => {
+    if (!auth.isIdentityCurrent(identity) || !isCurrentDetail(generation, id, detailIdentity)) {
+      throw new Error('当前事件或登录身份已变化')
+    }
+  }
   // form
   if (!formRef.value) return
   try {
@@ -373,12 +384,25 @@ const addFeedbackForm = async() => {
     id: eventDetailData.value?.id
   }
   // whether work order 1: is 0: ( ) work order is event, eventonly can 1 work order already
-  if (formData.value.work_order_status === 1) {
-    await flowFormRef.value?.addWorkorderFn()
-    params.work_order_data = flowFormRef.value?.form.work_order_data
+  let res: any
+  try {
+    assertCurrent()
+    if (params.work_order_status === 1) {
+      const order = await flowFormRef.value?.addWorkorderFn()
+      if (!order?.procInsId) return
+      assertCurrent()
+      params.work_order_data = order
+      res = await addWorkOrderFeedback(params, identity, assertCurrent)
+    } else {
+      res = await addFeedback(params)
+    }
+    assertCurrent()
+  } catch {
+    if (isCurrentDetail(generation, id, detailIdentity)) ElMessage.error(uiText('反馈状态未确认，请刷新并核实后再试'))
+    return
   }
-  const res: any = await addFeedback(params)
   if (res.code === 200) {
+    flowFormRef.value?.clearConfirmedIntent()
     ElMessage.success(uiText('反馈成功'))
     const currentId = formData.value.id
     const currentPoint = formData.value.point

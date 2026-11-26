@@ -161,9 +161,17 @@ public class CloudAiWorker {
                 : "准备失败，请核对检测运行环境、模型归档和摄像机授权", System.currentTimeMillis(), deploymentNodeId);
             log.warn("Cloud AI reconciliation {} at {}: {}", id, phase, error.getClass().getSimpleName());
         } finally {
-            if (previous == null) TenantContextHolder.clear(); else TenantContextHolder.setTenantId(previous);
-            jdbc.update("UPDATE vls_cloud_ai_run SET lease_owner=NULL,lease_until=? WHERE id=? AND lease_owner=?", System.currentTimeMillis()+5000, id, worker);
+            // The local slot belongs to this process, not to the database lease. Release it
+            // unconditionally so a failing cleanup statement can never pin a worker forever.
             active.remove(id);
+            if (previous == null) TenantContextHolder.clear(); else TenantContextHolder.setTenantId(previous);
+            try {
+                jdbc.update("UPDATE vls_cloud_ai_run SET lease_owner=NULL,lease_until=? WHERE id=? AND lease_owner=?", System.currentTimeMillis()+5000, id, worker);
+            } catch (RuntimeException cleanupError) {
+                // The row keeps this worker as owner until its lease expires. A later scan may then
+                // re-lease it and reconcile the remote process instead of starting a duplicate one.
+                log.warn("Cloud AI lease cleanup deferred: runId={}, error={}", id, cleanupError.getClass().getSimpleName());
+            }
         }
     }
 

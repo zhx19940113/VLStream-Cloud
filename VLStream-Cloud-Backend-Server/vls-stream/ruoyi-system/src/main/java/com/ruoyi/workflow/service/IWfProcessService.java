@@ -113,6 +113,8 @@ public interface IWfProcessService {
 
     String startVerifiedEventWorkOrder(ProcessStartBo processStartBo, SysUser sysUser);
 
+    String startManualEventWorkOrder(ProcessStartBo request, SysUser user);
+
     /**
      * workflow instanceidGet taskid
      *

@@ -51,6 +51,9 @@ class LocationTaskEventDeletionTest {
             + "uuid VARCHAR(64), u_type INT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)");
         jdbc.execute("CREATE TABLE oort_task_event_back (task_event_id VARCHAR(150), tenant_id VARCHAR(64), data VARCHAR(1000))");
         jdbc.execute("CREATE TABLE vls_device_media_upload (media_id VARCHAR(64), upload_status VARCHAR(20))");
+        jdbc.execute("CREATE TABLE oort_task_event_dispatch (request_id VARCHAR, rule_no INT,process_definition_id VARCHAR,"
+            + "proc_inst_id VARCHAR,work_order_id VARCHAR,dispatch_status VARCHAR,result_status VARCHAR,result_data VARCHAR,"
+            + "last_error VARCHAR,attempts INT,updated_at TIMESTAMP,actor_id VARCHAR,tenant_id VARCHAR,event_id VARCHAR,event_no INT)");
         jdbc.execute("CREATE TABLE vls_llm_review_task (tenant_id VARCHAR(64), formal_event_id VARCHAR(150), review_status VARCHAR(30))");
         jdbc.update("INSERT INTO vls_device_media_upload VALUES ('media-1','BOUND')");
         workflows = mock(IWfProcessService.class);

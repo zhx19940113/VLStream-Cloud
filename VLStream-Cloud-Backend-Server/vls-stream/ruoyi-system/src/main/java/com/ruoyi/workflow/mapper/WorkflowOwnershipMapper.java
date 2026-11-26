@@ -7,6 +7,7 @@ import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
 import com.ruoyi.workflow.domain.WorkflowStartRecord;
 import java.util.List;
+import java.util.Map;
 
 /** All queries explicitly bind the trusted tenant; the table is not user-editable. */
 public interface WorkflowOwnershipMapper {
@@ -46,6 +47,19 @@ public interface WorkflowOwnershipMapper {
     @Select("SELECT e.id FROM oort_task_event e WHERE BINARY e.tenant_id = BINARY #{tenant} "
         + "AND BINARY e.id = BINARY #{id} AND e.no = #{number} AND e.deleted_at = 0 FOR UPDATE")
     String lockLocalEvent(@Param("tenant") String tenant, @Param("id") String id, @Param("number") long number);
+
+    @InterceptorIgnore(tenantLine = "true")
+    @Select("SELECT work_order_status AS linked, JSON_UNQUOTE(JSON_EXTRACT(data,'$.work_order_data.id')) AS orderId,"
+        + " JSON_UNQUOTE(JSON_EXTRACT(data,'$.work_order_data.procInsId')) AS instance FROM oort_task_event"
+        + " WHERE BINARY tenant_id=BINARY #{tenant} AND BINARY id=BINARY #{id} AND no=#{number} AND deleted_at=0 FOR UPDATE")
+    Map<String,Object> lockedLinkedOrder(@Param("tenant") String tenant, @Param("id") String id, @Param("number") long number);
+
+    @InterceptorIgnore(tenantLine = "true")
+    @Update("UPDATE oort_task_event SET work_order_status=1,updated_at=NOW(),"
+        + "data=JSON_SET(COALESCE(data,JSON_OBJECT()),'$.work_order_data',CAST(#{snapshot} AS JSON)) "
+        + "WHERE BINARY tenant_id=BINARY #{tenant} AND BINARY id=BINARY #{id} AND no=#{number} AND deleted_at=0")
+    int linkLocalOrder(@Param("tenant") String tenant, @Param("id") String id, @Param("number") long number,
+                       @Param("snapshot") String snapshot);
 
     @InterceptorIgnore(tenantLine = "true")
     @Select("SELECT CAST(proc_ins_id AS CHAR CHARACTER SET utf8mb4) FROM vls_workflow_ownership "

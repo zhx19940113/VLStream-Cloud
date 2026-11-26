@@ -167,6 +167,10 @@ public class DeviceEventMqttHandler {
 			if (result == null) {
 				throw new IllegalStateException("事件写入数据库失败");
 			}
+			if (result.isDuplicate()) {
+				committed(DeviceEventFlowDiagnostics.Counter.EVENT_DUPLICATE);
+				return buildReply(envelope, eventId, result.getMediaId(), true, "事件已处理，重复消息已忽略");
+			}
 			committed(DeviceEventFlowDiagnostics.Counter.EVENT_BUSINESS_COMMITTED);
 			return buildReply(envelope, eventId, mediaId, true, multiTenant
 				? "事件已接收，等待外部业务处理" : "事件已接收并入库");

@@ -56,7 +56,11 @@ public class EventReportOutboxWorker {
 		Date now = new Date();
 		long staleMillis = positive(properties.getStaleLockMillis(), 60000L);
 		int batchSize = Math.max(1, Math.min(properties.getBatchSize() == null ? 50 : properties.getBatchSize(), 200));
-		int claimed = outboxMapper.claimBatch(workerId, now, new Date(now.getTime() - staleMillis), batchSize);
+		// Claim only what one lease window can deliver. Rows queued behind the head would sit
+		// locked while this worker serially calls the downstream endpoint, and their lease could
+		// expire before the first request, letting another instance take and send them again.
+		int capacity = Math.max(1, Math.min(batchSize, claimCapacity(staleMillis)));
+		int claimed = outboxMapper.claimBatch(workerId, now, new Date(now.getTime() - staleMillis), capacity);
 		if (claimed == 0) {
 			return;
 		}
@@ -64,6 +68,21 @@ public class EventReportOutboxWorker {
 		for (EventReportOutbox task : tasks) {
 			deliverOne(task);
 		}
+	}
+
+	/**
+	 * How many rows one lease window can safely deliver.
+	 *
+	 * <p>The claim lease is {@code staleLockMillis}; reserve a tenth of it for the acknowledgement
+	 * write after the last request, then divide by the per-request timeout. The limit is explicit
+	 * rather than the whole batch so a slow downstream cannot make the tail of the batch old enough
+	 * for another instance to reclaim before this one sends it.
+	 */
+	private int claimCapacity(long staleMillis) {
+		long reserve = Math.max(1L, staleMillis / 10L);
+		long window = Math.max(1L, staleMillis - reserve);
+		long perRequest = Math.max(1L, properties.getTimeoutMillis() == null ? 5000L : properties.getTimeoutMillis());
+		return (int) Math.max(1L, Math.min(200L, window / perRequest));
 	}
 
 	private void deliverOne(EventReportOutbox task) {
@@ -75,6 +94,12 @@ public class EventReportOutboxWorker {
 				|| !StringUtils.equals(task.getTenantId(), payload.getStr("device_tenant_id"))) {
 				throw new IllegalStateException("事件上报任务与报文租户不一致");
 			}
+			// A slow batch can outlive its claim. Re-check ownership immediately before the external
+			// call so a row already reclaimed by another instance is not delivered twice.
+			if (!stillOwned(task)) {
+				log.warn("事件上报任务已被其他实例接管，跳过本次发送: outboxId={}", task.getId());
+				return;
+			}
 			resolveMediaReferences(payload.getJSONArray("pics"));
 			resolveMediaReferences(payload.getJSONArray("video"));
 			reportClient.report(payload, task.getIdempotencyKey());
@@ -85,6 +110,18 @@ public class EventReportOutboxWorker {
 		} finally {
 			TenantContextHolder.setTenantId(previousTenant);
 		}
+	}
+
+	/**
+	 * Confirm this worker still holds a live claim for the row.
+	 */
+	private boolean stillOwned(EventReportOutbox task) {
+		if (task == null || task.getId() == null || StringUtils.isBlank(task.getTenantId())) {
+			return false;
+		}
+		long staleMillis = positive(properties.getStaleLockMillis(), 60000L);
+		return outboxMapper.countOwned(task.getId(), task.getTenantId(), workerId,
+			new Date(System.currentTimeMillis() - staleMillis)) == 1;
 	}
 
 	private void resolveMediaReferences(JSONArray pics) {

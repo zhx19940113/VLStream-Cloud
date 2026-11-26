@@ -185,7 +185,7 @@
     <!-- event -->
     <event-phone-f-back v-model:visible="eventDetailsFBVis" :data="currentItem" @close="eventDetailsFBVis = false" />
     <!--  -->
-    <event-details-dialog v-model="eventDetailsVis" :data="currentItem" @close="eventDetailsVis = false" />
+    <event-details-dialog v-model:visible="eventDetailsVis" :data="currentItem" />
     <!-- event -->
     <event-phone-confirm v-model:visible="eventDetailsCoVis" :data="currentItem" @close="eventDetailsCoVis = false" @refresh="getList" />
     <!-- dialog -->

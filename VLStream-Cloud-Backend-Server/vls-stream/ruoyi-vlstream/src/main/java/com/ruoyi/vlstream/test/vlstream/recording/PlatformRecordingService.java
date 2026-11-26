@@ -106,21 +106,42 @@ public class PlatformRecordingService {
     }
 
     public List<Map<String,Object>> segments(String id, String date) {
-        owned(id);
+        Map<String,Object> row = owned(id);
         LocalDate day;
         try { day = LocalDate.parse(date); } catch (RuntimeException invalid) { throw new ServiceException("请选择有效日期"); }
         long start = day.atStartOfDay(ZoneId.of("Asia/Shanghai")).toInstant().toEpochMilli();
-        return jdbc.queryForList("SELECT id,start_ms,end_ms,size_bytes FROM vls_platform_record_segment WHERE source_id=? AND end_ms>? AND start_ms<? ORDER BY start_ms LIMIT 10000", id, Math.max(start, System.currentTimeMillis() - TimeUnit.DAYS.toMillis(7)), start + 86400000L);
+        // Playback honours the same per-source policy as cleanup. A fixed seven-day window hid
+        // segments that a 30/90-day or permanent source still keeps on disk.
+        long cutoff = Math.max(start, retentionCutoff(retentionDays(row), System.currentTimeMillis()));
+        return jdbc.queryForList("SELECT id,start_ms,end_ms,size_bytes FROM vls_platform_record_segment WHERE source_id=? AND end_ms>? AND start_ms<? ORDER BY start_ms LIMIT 10000", id, cutoff, start + 86400000L);
     }
 
     public Path file(String segmentId) {
-        List<Map<String,Object>> rows = jdbc.queryForList("SELECT s.source_id FROM vls_platform_record_segment s JOIN vls_platform_record_source r ON r.id=s.source_id WHERE s.id=? AND r.tenant_id=? AND s.end_ms>?",
-            segmentId, CloudAiService.tenant(), System.currentTimeMillis() - TimeUnit.DAYS.toMillis(7));
+        List<Map<String,Object>> rows = jdbc.queryForList("SELECT s.source_id,s.end_ms,r.retention_days FROM vls_platform_record_segment s JOIN vls_platform_record_source r ON r.id=s.source_id WHERE s.id=? AND r.tenant_id=?",
+            segmentId, CloudAiService.tenant());
         if (rows.size() != 1) throw new ServiceException("录像不存在、已过期或无权访问", 404);
-        owned(String.valueOf(rows.get(0).get("source_id")));
-        Path file = segmentPath(String.valueOf(rows.get(0).get("source_id")), segmentId, ".mp4");
+        Map<String,Object> row = rows.get(0);
+        String sourceId = String.valueOf(row.get("source_id"));
+        // Authorise the device before revealing whether this segment is inside its policy window.
+        owned(sourceId);
+        long cutoff = retentionCutoff(retentionDays(row), System.currentTimeMillis());
+        if (row.get("end_ms") == null || ((Number) row.get("end_ms")).longValue() <= cutoff)
+            throw new ServiceException("录像不存在、已过期或无权访问", 404);
+        Path file = segmentPath(sourceId, segmentId, ".mp4");
         if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) throw new ServiceException("录像文件暂不可用", 404);
         return file;
+    }
+
+    /**
+     * The configured retention for one source row, defaulting to the legacy seven days.
+     */
+    private static int retentionDays(Map<String,Object> row) {
+        Object value = row.get("retention_days");
+        if (!(value instanceof Number)) {
+            return 7;
+        }
+        int days = ((Number) value).intValue();
+        return Arrays.asList(0, 7, 30, 90).contains(days) ? days : 7;
     }
 
     private Map<String,Object> owned(String id) {

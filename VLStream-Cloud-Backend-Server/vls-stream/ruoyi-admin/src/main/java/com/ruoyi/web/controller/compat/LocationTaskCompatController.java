@@ -220,6 +220,11 @@ public class LocationTaskCompatController {
         });
     }
 
+    @PostMapping("/task/v1/event_dispatch_retry")
+    public LocationTaskResult<?> retryDispatch(@RequestBody(required = false) Map<String, Object> body) {
+        return execute(body, taskService::retryDispatch);
+    }
+
     /**
      * Return an event's feedback history.
      */

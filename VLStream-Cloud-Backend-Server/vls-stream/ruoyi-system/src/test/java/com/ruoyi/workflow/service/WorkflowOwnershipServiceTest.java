@@ -27,7 +27,7 @@ class WorkflowOwnershipServiceTest {
     private final RuntimeService runtime = mock(RuntimeService.class);
     private final RepositoryService repository = mock(RepositoryService.class);
     private final WorkflowOwnershipService service = new WorkflowOwnershipService(mapper, mock(TaskService.class),
-        mock(HistoryService.class), runtime, repository);
+        mock(HistoryService.class), runtime, repository, new com.fasterxml.jackson.databind.ObjectMapper());
 
     @Test void localEventMustBeSameTenantAndReadUnderAnActiveTransaction() throws Exception {
         Field mode = WorkflowOwnershipService.class.getDeclaredField("tenantType");

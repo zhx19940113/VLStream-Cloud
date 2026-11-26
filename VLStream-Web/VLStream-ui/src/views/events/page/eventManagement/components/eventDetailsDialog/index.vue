@@ -205,7 +205,7 @@
         </el-tabs>
         <div class="feedbacklist">
           <FeedbackRecord v-if="activeIndex === '1'" :feedback-list-data="feedbackListData" />
-          <WorkOrderRecord v-if="activeIndex === '2'" :item="eventDetailData" />
+          <EventWorkOrders v-if="activeIndex === '2'" :item="eventDetailData" @refresh="getEventDetail()" />
         </div>
       </div>
       <div class="d_h_maintainBtns">
@@ -225,7 +225,7 @@ import MultiImageUpload from '../multiImageUpload.vue'
 import CommonExpressions from '@/components/commonExpressions.vue'
 import FeedbackRecord from './feedbackRecord.vue'
 import PersonInfoCard from '@/components/PersonInfoCard.vue'
-import WorkOrderRecord from './workOrderRecord.vue'
+import EventWorkOrders from './EventWorkOrders.vue'
 import { eventDetail, addFeedback, feedbackList } from '@/api/smartCity/events'
 import { useUserStore } from '@/store/modules/useraPaas'
 import { ElMessage } from 'element-plus'

@@ -1252,6 +1252,16 @@ public class WfProcessServiceImpl extends FlowServiceFactory implements IWfProce
     @Override
     @Transactional(rollbackFor = Exception.class)
     public String startVerifiedEventWorkOrder(ProcessStartBo request, SysUser user) {
+        return startVerifiedEventWorkOrder(request, user, false);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public String startManualEventWorkOrder(ProcessStartBo request, SysUser user) {
+        return startVerifiedEventWorkOrder(request, user, true);
+    }
+
+    private String startVerifiedEventWorkOrder(ProcessStartBo request, SysUser user, boolean manual) {
         if (request == null || user == null || request.getWorkOrderBo() == null) {
             throw new ServiceException("缺少事件工单参数");
         }
@@ -1266,18 +1276,26 @@ public class WfProcessServiceImpl extends FlowServiceFactory implements IWfProce
                 throw new ServiceException("已创建工单状态无法核实，请联系管理员");
             }
             request.setWorkOrder(order);
+            if (manual) workflowOwnership.linkManualOrder(order, true);
             return previous.getProcInsId();
         }
         workflowOwnership.requireVerifiedLocalEvent(user.getTenantId(), request.getWorkOrderBo().getEventNumber());
         ProcessDefinition selectedDefinition = repositoryService.createProcessDefinitionQuery()
             .processDefinitionTenantId(user.getTenantId()).processDefinitionId(request.getProcessDefId()).singleResult();
         if (selectedDefinition == null) throw new ServiceException("未找到当前租户指定的流程定义");
-        String instance = startProcess(selectedDefinition, request, user, true);
+        String previousActor = org.flowable.common.engine.impl.identity.Authentication.getAuthenticatedUserId();
+        String instance;
+        try {
+            instance = startProcess(selectedDefinition, request, user, true);
+        } finally {
+            identityService.setAuthenticatedUserId(previousActor);
+        }
         if (!workflowOwnership.recordVerifiedRunningOrder(user.getTenantId(), instance, request.getWorkOrder())) {
             throw new ServiceException("工单流程定义或归属无法可信验证");
         }
         workflowOwnership.completeStart(user.getTenantId(), user.getUserId(), request.getRequestId(),
             instance, request.getWorkOrder().getId());
+        if (manual) workflowOwnership.linkManualOrder(request.getWorkOrder(), false);
         return instance;
     }
 
@@ -1703,18 +1721,13 @@ public class WfProcessServiceImpl extends FlowServiceFactory implements IWfProce
 
         // String userIdStr = TaskUtils.getUserId();
         identityService.setAuthenticatedUserId(String.valueOf(sysUser.getUserId()));
-        // Set workflow id
-        processStartBo.getVariables().put(BpmnXMLConstants.ATTRIBUTE_EVENT_START_INITIATOR,
-                String.valueOf(sysUser.getUserId()));
-        // Set workflow to in
-        processStartBo.getVariables().put(ProcessConstants.PROCESS_STATUS_KEY, ProcessStatus.RUNNING.getStatus());
-
-        // null / empty
         if (processStartBo.getVariables() == null) {
             processStartBo.setVariables(new HashMap<>());
         }
-
+        processStartBo.getVariables().put(BpmnXMLConstants.ATTRIBUTE_EVENT_START_INITIATOR, sysUser.getUserId());
+        processStartBo.getVariables().put(ProcessConstants.PROCESS_STATUS_KEY, ProcessStatus.RUNNING.getStatus());
         String applicationId = currentRequestApplicationId();
+        if (useExactDefinition && applicationId == null) applicationId = processStartBo.getAppId();
         processStartBo.getVariables().put("appid", applicationId);
         // if Get formfield
         if (processStartBo.isAutoGetFormFlag()) {
@@ -1723,7 +1736,8 @@ public class WfProcessServiceImpl extends FlowServiceFactory implements IWfProce
             processStartBo.setVariables(mappedVariables);
             log.info("表单字段映射完成");
         }
-        // workflow instance
+        processStartBo.getVariables().put(ProcessConstants.PROCESS_STATUS_KEY, ProcessStatus.RUNNING.getStatus());
+        processStartBo.getVariables().put(BpmnXMLConstants.ATTRIBUTE_EVENT_START_INITIATOR, sysUser.getUserId());
         ProcessInstance processInstance = useExactDefinition
             ? runtimeService.startProcessInstanceById(procDef.getId(), processStartBo.getVariables())
             : runtimeService.startProcessInstanceByKeyAndTenantId(procDef.getKey(),
@@ -1892,7 +1906,7 @@ public class WfProcessServiceImpl extends FlowServiceFactory implements IWfProce
                 workOrder = workOrderService.insertByBo(processStartBo.getWorkOrderBo(), sysUser);
                 runtimeService.setVariable(processInstance.getId(), "workorderId", workOrderAppId);
             }
-            if (StringUtils.isBlank(processStartBo.getEventName())) {
+            if (workOrder == null && StringUtils.isBlank(processStartBo.getEventName())) {
                 workOrder = workOrderService.insertByBo(processStartBo.getWorkOrderBo(), sysUser);
             }
             processStartBo.setWorkOrder(workOrder);

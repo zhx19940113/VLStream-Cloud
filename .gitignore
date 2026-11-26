@@ -61,6 +61,11 @@ D:\work\ide\WorkSpace\VLStream-Cloud\VLStream-Cloud-Backend-Server\vls-stream\do
 /VLStream-Cloud-Backend-Server/vls-stream/ruoyi-admin/src/test/**
 !/VLStream-Cloud-Backend-Server/vls-stream/ruoyi-admin/src/test/**/
 !/VLStream-Cloud-Backend-Server/vls-stream/ruoyi-admin/src/test/java/com/ruoyi/web/controller/compat/LocationTaskEventDeletionTest.java
+!/VLStream-Cloud-Backend-Server/vls-stream/ruoyi-admin/src/test/java/com/ruoyi/web/controller/compat/LocationTaskEventNumberTest.java
+!/VLStream-Cloud-Backend-Server/vls-stream/ruoyi-admin/src/test/java/com/ruoyi/web/controller/compat/LocationTaskIngestionMysqlTest.java
+!/VLStream-Cloud-Backend-Server/vls-stream/ruoyi-admin/src/test/java/com/ruoyi/web/controller/compat/LocalEventDispatchWorkerTest.java
+!/VLStream-Cloud-Backend-Server/vls-stream/ruoyi-admin/src/test/java/com/ruoyi/web/controller/compat/LocationTaskClosureFlowableMysqlTest.java
+!/VLStream-Cloud-Backend-Server/vls-stream/ruoyi-admin/src/test/java/com/ruoyi/web/controller/compat/LocationTaskEventUserBatchTest.java
 !/VLStream-Cloud-Backend-Server/vls-stream/ruoyi-admin/src/test/java/com/ruoyi/web/controller/compat/EventLocationServiceTest.java
 !/VLStream-Cloud-Backend-Server/vls-stream/ruoyi-admin/src/test/java/com/ruoyi/web/controller/compat/TenantActiveSafetyEventReportServiceTest.java
 !/VLStream-Cloud-Backend-Server/vls-stream/ruoyi-admin/src/test/java/com/ruoyi/web/controller/compat/VlsMqttClientIdConfigTest.java

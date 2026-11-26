@@ -7,6 +7,9 @@ import com.ruoyi.common.helper.LoginHelper;
 import com.ruoyi.common.utils.StringUtils;
 import com.ruoyi.workflow.mapper.WorkflowOwnershipMapper;
 import com.ruoyi.workflow.domain.WorkflowStartRecord;
+import com.ruoyi.workflow.support.EventNumbers;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ruoyi.workorder.domain.WorkOrder;
 import lombok.RequiredArgsConstructor;
 import org.flowable.engine.HistoryService;
@@ -21,6 +24,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /** Resolves request identifiers via Flowable and enforces a server-owned classification. */
@@ -37,6 +41,7 @@ public class WorkflowOwnershipService {
     private final HistoryService history;
     private final RuntimeService runtime;
     private final RepositoryService repository;
+    private final ObjectMapper objectMapper;
     @org.springframework.beans.factory.annotation.Value("${token.tenant-type:${token.tenantType:single}}")
     private String tenantType;
     @org.springframework.beans.factory.annotation.Autowired(required = false)
@@ -68,21 +73,48 @@ public class WorkflowOwnershipService {
             return;
         }
         if (!"single".equalsIgnoreCase(tenantType)) throw new ServiceException("未知租户模式");
-        String id = externalId;
-        long number = 0;
-        String[] parts = externalId.split("-");
-        if (parts.length == 3) {
-            try {
-                number = Long.parseLong(parts[2]);
-                id = parts[0] + "-" + parts[1];
-            } catch (NumberFormatException ignored) {
-                number = 0;
-                id = externalId;
+        for (EventNumbers.Key key : EventNumbers.candidates(externalId)) {
+            if (ownership.lockLocalEvent(tenant, key.getId(), key.getNo()) != null) return;
+        }
+        throw new ServiceException("事件不存在或不属于当前租户");
+    }
+
+    /** Link the server-created order before its creation transaction commits. */
+    public void linkManualOrder(WorkOrder order, boolean replay) {
+        if ("multi".equalsIgnoreCase(tenantType)) return;
+        if (!"single".equalsIgnoreCase(tenantType) || !TransactionSynchronizationManager.isActualTransactionActive()) {
+            throw new ServiceException("事件工单关联需要单租户事务");
+        }
+        String tenant = order.getTenantId();
+        requireIdentifier(tenant);
+        requireIdentifier(order.getId());
+        requireIdentifier(order.getProcInsId());
+        for (EventNumbers.Key key : EventNumbers.candidates(order.getEventNumber())) {
+            Map<String,Object> link = ownership.lockedLinkedOrder(tenant, key.getId(), key.getNo());
+            if (link == null) continue;
+            String current = (String) link.get("instance");
+            String currentOrder = (String) link.get("orderId");
+            boolean linked = ((Number) link.get("linked")).intValue() == 1;
+            if (order.getProcInsId().equals(current) && StringUtils.isNotBlank(currentOrder)
+                    && !order.getId().equals(currentOrder)) {
+                throw new ServiceException("事件的工单编号与原关联不一致");
             }
+            if (linked && order.getProcInsId().equals(current)) return;
+            if (linked && StringUtils.isBlank(current) && !order.getId().equals(currentOrder)) {
+                throw new ServiceException("原工单关联无法核实，请刷新并核实原工单");
+            }
+            if (StringUtils.isNotBlank(current) && !order.getProcInsId().equals(current) && (replay || runtime.createProcessInstanceQuery()
+                    .processInstanceTenantId(tenant).processInstanceId(current).singleResult() != null)) {
+                throw new ServiceException("事件已关联其他工单，请刷新并核实原工单");
+            }
+            try {
+                if (ownership.linkLocalOrder(tenant, key.getId(), key.getNo(), objectMapper.writeValueAsString(order)) == 1) return;
+            } catch (JsonProcessingException failure) {
+                throw new IllegalStateException("工单关联快照序列化失败", failure);
+            }
+            break;
         }
-        if (ownership.lockLocalEvent(tenant, id, number) == null) {
-            throw new ServiceException("事件不存在或不属于当前租户");
-        }
+        throw new ServiceException("事件工单关联失败");
     }
 
     /** A claim and its completion must commit atomically with the new Flowable instance. */

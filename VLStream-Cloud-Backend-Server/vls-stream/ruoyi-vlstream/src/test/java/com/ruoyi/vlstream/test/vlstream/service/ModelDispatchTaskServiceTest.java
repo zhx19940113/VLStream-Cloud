@@ -104,6 +104,34 @@ class ModelDispatchTaskServiceTest {
 		assertTrue(captor.getValue().getParamNameValuePairs().containsValue("SUCCESS"));
 	}
 
+	@Test
+	void aConcurrentDownloadCompletionDoesNotDropTheTerminalReply() {
+		// First read: the download has finished; the reply arrives before this status advances.
+		ModelDispatchTask downloaded = new ModelDispatchTask();
+		downloaded.setRequestId("request-1");
+		downloaded.setMqttMessageId("mqtt-1");
+		downloaded.setDeviceId("CAM-1");
+		downloaded.setSha256(task.getSha256());
+		downloaded.setDispatchStatus("DOWNLOADED");
+		// Second read: another writer has stored SUCCESS in the meantime, so our guarded update
+		// touches zero rows. The state machine must accept that the terminal state already arrived.
+		ModelDispatchTask deployed = new ModelDispatchTask();
+		deployed.setRequestId("request-1");
+		deployed.setMqttMessageId("mqtt-1");
+		deployed.setDeviceId("CAM-1");
+		deployed.setSha256(task.getSha256());
+		deployed.setDispatchStatus("SUCCESS");
+		when(taskMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(downloaded).thenReturn(deployed);
+		when(taskMapper.update(isNull(), any(LambdaUpdateWrapper.class))).thenReturn(0);
+
+		boolean applied = taskService.applyHardwareReply("mqtt-1", "request-1", "CAM-1", "SUCCESS",
+			task.getSha256(), "done", "{}");
+
+		assertTrue(applied, "a reply that lost the update race is still observed as applied");
+		org.mockito.Mockito.verify(taskMapper, org.mockito.Mockito.times(2))
+			.selectOne(any(LambdaQueryWrapper.class));
+	}
+
 	private void setField(Object target, String name, Object value) throws Exception {
 		Field field = target.getClass().getDeclaredField(name);
 		field.setAccessible(true);

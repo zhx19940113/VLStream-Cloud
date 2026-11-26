@@ -27,15 +27,15 @@ import com.ruoyi.vlstream.test.vlstream.service.DeviceMediaUploadService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.dao.DataAccessException;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.transaction.support.TransactionSynchronizationAdapter;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
-import org.springframework.web.context.request.RequestAttributes;
-import org.springframework.web.context.request.RequestContextHolder;
 
 import javax.sql.DataSource;
 import java.math.BigDecimal;
@@ -58,7 +58,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.CompletableFuture;
 
 /**
  * Java implementation of the task APIs previously served by apaas-location-service.
@@ -100,8 +99,14 @@ public class LocationTaskCompatService implements ActiveSafetyEventReportService
         new TypeReference<LinkedHashMap<String, Object>>() { };
 
     private final JdbcTemplate jdbc;
+    private TransactionTemplate batchMemberTransaction;
+
+    @Autowired
+    void configureBatchTransactions(PlatformTransactionManager transactions) {
+        this.batchMemberTransaction = new TransactionTemplate(transactions);
+        this.batchMemberTransaction.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+    }
     private final ObjectMapper objectMapper;
-    private final IWfProcessService processService;
     private final LocationTaskWorkflowProperties workflowProperties;
 
     @Autowired
@@ -121,7 +126,6 @@ public class LocationTaskCompatService implements ActiveSafetyEventReportService
                                      LocationTaskWorkflowProperties workflowProperties) {
         this.jdbc = new JdbcTemplate(dataSource);
         this.objectMapper = objectMapper;
-        this.processService = processService;
         this.workflowProperties = workflowProperties;
     }
 
@@ -177,8 +181,8 @@ public class LocationTaskCompatService implements ActiveSafetyEventReportService
         if (validation != null) {
             return validation;
         }
-        EventKey key = insertCameraEvent(body);
-        return LocationTaskResult.success(findEvent(key.externalId()));
+        ActiveSafetyEventReportResult result = insertCameraEvent(body, null, null);
+        return LocationTaskResult.success(findEvent(result.getActiveSafetyEventId()));
     }
 
     /**
@@ -203,8 +207,8 @@ public class LocationTaskCompatService implements ActiveSafetyEventReportService
         }
         for (Map<String, Object> event : events) {
             try {
-                insertCameraEvent(event);
-            } catch (DataAccessException exception) {
+                batchMemberTransaction.execute(status -> insertCameraEvent(event, null, null));
+            } catch (RuntimeException exception) {
                 LOGGER.warn("Camera batch member could not be persisted for device {}",
                     stringValue(event, "device_id"), exception);
             }
@@ -236,15 +240,8 @@ public class LocationTaskCompatService implements ActiveSafetyEventReportService
     /**
      * Persist one active-safety event and schedule its configuration-controlled work-order hook.
      */
-    private EventKey insertCameraEvent(Map<String, Object> body) {
-        return insertCameraEvent(body, null);
-    }
-
-    private EventKey insertCameraEvent(Map<String, Object> body, ActiveSafetyEventReport mqttReport) {
-        return insertCameraEvent(body, mqttReport, null);
-    }
-
-    private EventKey insertCameraEvent(Map<String, Object> body, ActiveSafetyEventReport mqttReport, EventKey reservedKey) {
+    private ActiveSafetyEventReportResult insertCameraEvent(Map<String, Object> body,
+                                                              ActiveSafetyEventReport mqttReport, EventKey reservedKey) {
         String tenantId = singleTenantId;
         String deviceId = stringValue(body, "device_id");
         String deviceName = stringValue(body, "device_name");
@@ -279,17 +276,30 @@ public class LocationTaskCompatService implements ActiveSafetyEventReportService
                 ? "" : new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.ROOT)
                     .format(mqttReport.getEventTime()));
         }
-        jdbc.update("INSERT INTO " + EVENT
+        try {
+            jdbc.update("INSERT INTO " + EVENT
                 + " (`id`,`no`,`tenant_id`,`uuid`,`name`,`data`,`status`,`item`,`client`,`mod_type`,"
                 + "`mod_status`,`device_id`,`device_name`,`device_tag`,`work_order_status`,"
-                + "`created_at`,`updated_at`,`deleted_at`) "
-                + "VALUES (?,?,?,?,?,CAST(? AS JSON),2,?,'camera',2,0,?,?,?,0,?,NOW(),0)",
-            key.getId(), key.getNo(), tenantId, deviceId, name, toJson(data), item,
-            deviceId, deviceName, stringValue(body, "device_tag"),
-            reservedKey != null && mqttReport != null && mqttReport.getEventTime() != null ? mqttReport.getEventTime() : new Date());
+                + "`created_at`,`updated_at`,`deleted_at`,mqtt_message_hash,device_event_hash) "
+                + "VALUES (?,?,?,?,?,CAST(? AS JSON),2,?,'camera',2,0,?,?,?,0,?,NOW(),0,UNHEX(SHA2(?,256)),UNHEX(SHA2(?,256)))",
+                key.getId(), key.getNo(), tenantId, deviceId, name, toJson(data), item,
+                deviceId, deviceName, stringValue(body, "device_tag"),
+                reservedKey != null && mqttReport != null && mqttReport.getEventTime() != null ? mqttReport.getEventTime() : new Date(),
+                mqttReport == null ? null : mqttReport.getSourceMessageId(),
+                mqttReport == null ? null : mqttReport.getDeviceEventId());
+        } catch (DuplicateKeyException collision) {
+            if (mqttReport != null) {
+                // A repeatable-read snapshot can predate the winning commit. Read its receipt with a current read.
+                Map<String, Object> winner = findIndexedReceipt(deviceId, mqttReport.getSourceMessageId(),
+                    mqttReport.getDeviceEventId(), true);
+                if (winner != null) return activeSafetyResult(winner, true);
+            }
+            throw collision;
+        }
         scheduleAutomaticWorkOrder(new EventSnapshot(key, tenantId, deviceId, name, item,
-            describe, point, resolveEventPictures(pictures), 2, deviceId));
-        return key;
+            describe, point, pictures, 2, deviceId));
+        return ActiveSafetyEventReportResult.builder().activeSafetyEventId(key.externalId())
+            .mediaId(mqttReport == null ? null : mqttReport.getMediaId()).duplicate(false).build();
     }
 
     /**
@@ -479,8 +489,11 @@ public class LocationTaskCompatService implements ActiveSafetyEventReportService
         if (codePointLength(stringValue(body, "describe")) > 1024) {
             return parameterError("参数错误 describe不能超过1024个字符串");
         }
-        Map<String, Object> event = findEventRaw(externalId);
-        if (event == null || !user.getTenantId().equals(string(event.get("tenant_id")))) {
+        EventKey key = EventKey.parse(externalId);
+        Map<String, Object> event = firstRow("SELECT * FROM " + EVENT
+            + " WHERE BINARY id=BINARY ? AND `no`=? AND BINARY tenant_id=BINARY ? AND deleted_at=0 FOR UPDATE",
+            key.getId(), key.getNo(), user.getTenantId());
+        if (event == null) {
             return error(NOT_FOUND, "没找到记录");
         }
         int modStatus = intValue(body, "mod_status", 0);
@@ -489,7 +502,15 @@ public class LocationTaskCompatService implements ActiveSafetyEventReportService
             return parameterError("参数错误 mod_status 主动安全反馈时状态必须确定状态");
         }
 
-        EventKey key = EventKey.parse(externalId);
+        Map<String, Object> eventData = jsonMap(event.get("data"));
+        boolean linked = number(event.get("work_order_status")).intValue() == 1;
+        if (intValue(body, "work_order_status", 0) == 1) {
+            String submitted = string(nestedMap(body, "work_order_data").get("procInsId"));
+            String current = string(nestedMap(eventData, "work_order_data").get("procInsId"));
+            if (!linked || (!submitted.isEmpty() && !submitted.equals(current))) {
+                return parameterError("工单关联已变化，请刷新后核实");
+            }
+        }
         LinkedHashMap<String, Object> feedbackData = new LinkedHashMap<String, Object>();
         feedbackData.put("describe", stringValue(body, "describe"));
         feedbackData.put("point", pointValue(body.get("point")));
@@ -502,32 +523,26 @@ public class LocationTaskCompatService implements ActiveSafetyEventReportService
         int oldStatus = number(event.get("status")).intValue();
         int status = intValue(body, "status", 0);
         int oldModStatus = number(event.get("mod_status")).intValue();
-        int workOrderStatus = intValue(body, "work_order_status", 0);
-        Map<String, Object> eventData = jsonMap(event.get("data"));
         StringBuilder update = new StringBuilder("UPDATE ").append(EVENT).append(" SET updated_at = NOW()");
         List<Object> args = new ArrayList<Object>();
         if (number(event.get("mod_type")).intValue() == 2 && modStatus > 0 && modStatus != oldModStatus) {
             update.append(", mod_status = ?");
             args.add(modStatus);
         }
-        if (status != oldStatus) {
+        if (status != oldStatus && !linked && jdbc.queryForObject(
+                "SELECT COUNT(*) FROM oort_task_event_dispatch WHERE tenant_id=? AND event_id=? AND event_no=?",
+                Long.class, user.getTenantId(), key.getId(), key.getNo()) == 0L) {
             update.append(", status = ?");
             args.add(status);
             if (status == 1) {
                 eventData.put("finish_at", DATE_TIME_FORMAT.format(LocalDateTime.now()));
             }
         }
-        if (workOrderStatus == 1) {
-            update.append(", work_order_status = 1");
-            Object workOrderData = body.get("work_order_data");
-            if (workOrderData instanceof Map && ((Map<?, ?>) workOrderData).size() > 1) {
-                eventData.put("work_order_data", workOrderData);
-            }
-        }
-        update.append(", data = CAST(? AS JSON) WHERE id = ? AND `no` = ?");
+        update.append(", data = CAST(? AS JSON) WHERE BINARY id=BINARY ? AND `no`=? AND BINARY tenant_id=BINARY ?");
         args.add(toJson(eventData));
         args.add(key.getId());
         args.add(key.getNo());
+        args.add(user.getTenantId());
         jdbc.update(update.toString(), args.toArray());
         return LocationTaskResult.success();
     }
@@ -561,8 +576,31 @@ public class LocationTaskCompatService implements ActiveSafetyEventReportService
         if (event == null) {
             return error(NOT_FOUND, "没找到记录");
         }
+        List<Map<String, Object>> dispatches = jdbc.queryForList(
+            "SELECT request_id,rule_no,process_definition_id,proc_inst_id,work_order_id,dispatch_status,"
+                + "result_status,result_data,last_error,attempts,updated_at,actor_id FROM oort_task_event_dispatch"
+                + " WHERE tenant_id=? AND event_id=? AND event_no=? ORDER BY rule_no",
+            user.getTenantId(), raw.get("id"), raw.get("no"));
+        for (Map<String, Object> dispatch : dispatches) {
+            dispatch.put("updated_at", formatDate(dispatch.get("updated_at")));
+            dispatch.put("can_retry", user.getUserId().equals(dispatch.remove("actor_id"))
+                && "RETRY".equals(dispatch.get("dispatch_status")));
+            if (dispatch.get("result_data") != null) dispatch.put("result_data", jsonMap(dispatch.get("result_data")));
+        }
+        event.put("work_order_dispatches", dispatches);
         if (eventLocationService != null) eventLocationService.enrich(Collections.singletonList(event), user.getTenantId(), user.getToken());
         return LocationTaskResult.success(event);
+    }
+
+    /** Let the configured workflow initiator expedite an existing failed request. */
+    public LocationTaskResult<?> retryDispatch(Map<String, Object> body, UserContext user) {
+        Map<String, Object> event = findEventRaw(stringValue(body, "id"), user.getTenantId());
+        if (event == null) return error(NOT_FOUND, "没找到记录");
+        int updated = jdbc.update("UPDATE oort_task_event_dispatch SET next_attempt_at=NOW(),dispatch_status='PENDING'"
+                + " WHERE request_id=? AND tenant_id=? AND event_id=? AND event_no=? AND actor_id=?"
+                + " AND dispatch_status='RETRY'", stringValue(body, "request_id"), user.getTenantId(),
+            event.get("id"), event.get("no"), user.getUserId());
+        return updated == 1 ? LocationTaskResult.success() : error(NOT_FOUND, "没有可重试的派单记录");
     }
 
     /**
@@ -573,7 +611,7 @@ public class LocationTaskCompatService implements ActiveSafetyEventReportService
         if (eventId.isEmpty()) {
             return parameterError("参数错误 task_event_id不能为空");
         }
-        if (findEventRaw(eventId) == null) {
+        if (findEventRaw(eventId, user.getTenantId()) == null) {
             return error(NOT_FOUND, "没找到记录");
         }
         int page = positiveInt(body, "page", 1);
@@ -693,13 +731,17 @@ public class LocationTaskCompatService implements ActiveSafetyEventReportService
         where.add("te.deleted_at = 0");
         where.add("te.tenant_id = ?");
         args.add(user.getTenantId());
+        // Executor and feedback rows are keyed by the externally visible number: sequence zero
+        // (cloud events) uses the bare id, other sequences use "id-no". Concatenating unconditionally
+        // made every cloud event miss its executors and feedback.
+        String externalKey = "CASE WHEN te.`no` = 0 THEN te.id ELSE CONCAT(te.id,'-',te.`no`) END";
         if (executionStatus == 4 || executionStatus == 1) {
             from.append(" LEFT JOIN ").append(EVENT_USER)
-                .append(" eu ON eu.task_event_id = CONCAT(te.id,'-',te.`no`) ");
+                .append(" eu ON eu.task_event_id = ").append(externalKey).append(' ');
         }
         if (executionStatus == 4) {
             where.add("((eu.uuid = ? AND eu.u_type = 1) OR te.uuid = ? OR "
-                + "CONCAT(te.id,'-',te.`no`) IN (SELECT task_event_id FROM " + EVENT_BACK + " WHERE uuid = ?))");
+                + externalKey + " IN (SELECT task_event_id FROM " + EVENT_BACK + " WHERE uuid = ?))");
             args.add(user.getUserId());
             args.add(user.getUserId());
             args.add(user.getUserId());
@@ -710,7 +752,7 @@ public class LocationTaskCompatService implements ActiveSafetyEventReportService
             where.add("te.uuid = ?");
             args.add(user.getUserId());
         } else if (executionStatus == 3) {
-            where.add("CONCAT(te.id,'-',te.`no`) IN (SELECT task_event_id FROM " + EVENT_BACK + " WHERE uuid = ?)");
+            where.add(externalKey + " IN (SELECT task_event_id FROM " + EVENT_BACK + " WHERE uuid = ?)");
             args.add(user.getUserId());
         }
 
@@ -983,12 +1025,24 @@ public class LocationTaskCompatService implements ActiveSafetyEventReportService
             || string(deviceEventId).isEmpty()) {
             return null;
         }
-        Map<String, Object> row = firstRow("SELECT * FROM " + EVENT
-                + " WHERE tenant_id = ? AND device_id = ? AND deleted_at = 0"
+        Map<String, Object> row = findIndexedReceipt(deviceId, sourceMessageId, deviceEventId, false);
+        if (row != null) return activeSafetyResult(row, true);
+        row = firstRow("SELECT id,`no`,data FROM " + EVENT
+                + " WHERE tenant_id = ? AND device_id = ? AND deleted_at = 0 AND mqtt_message_hash IS NULL"
+                + " AND device_event_hash IS NULL"
                 + " AND (JSON_UNQUOTE(JSON_EXTRACT(data,'$.mqtt_message_id')) = ?"
                 + " OR JSON_UNQUOTE(JSON_EXTRACT(data,'$.device_event_id')) = ?) LIMIT 1",
             singleTenantId, deviceId, sourceMessageId, deviceEventId);
         return row == null ? null : activeSafetyResult(row, true);
+    }
+
+    private Map<String, Object> findIndexedReceipt(String deviceId, String sourceMessageId, String deviceEventId,
+                                                    boolean currentRead) {
+        return firstRow("SELECT id,`no`,data FROM " + EVENT
+                + " WHERE tenant_id=? AND device_id=? AND deleted_at=0"
+                + " AND (mqtt_message_hash=UNHEX(SHA2(?,256)) OR device_event_hash=UNHEX(SHA2(?,256)))"
+                + " LIMIT 1" + (currentRead ? " LOCK IN SHARE MODE" : ""),
+            singleTenantId, deviceId, sourceMessageId, deviceEventId);
     }
 
     /**
@@ -1066,12 +1120,7 @@ public class LocationTaskCompatService implements ActiveSafetyEventReportService
             : mediaReferences(report.getImageMediaIds()));
         body.put("video", mediaReferences(report.getVideoMediaIds()));
 
-        EventKey key = insertCameraEvent(body, report, reservedKey);
-        return ActiveSafetyEventReportResult.builder()
-            .activeSafetyEventId(key.externalId())
-            .mediaId(report.getMediaId())
-            .duplicate(false)
-            .build();
+        return insertCameraEvent(body, report, reservedKey);
     }
 
     /**
@@ -1487,7 +1536,8 @@ public class LocationTaskCompatService implements ActiveSafetyEventReportService
             sql.append("LEFT JOIN ").append(EVENT_USER)
                 .append(" teu ON teu.uuid = u.user_id AND teu.tenant_id = d.tenant_id ")
                 .append("LEFT JOIN ").append(EVENT)
-                .append(" te ON te.id = teu.task_event_id AND teu.tenant_id = te.tenant_id")
+                .append(" te ON CASE WHEN te.`no`=0 THEN te.id ELSE CONCAT(te.id,'-',te.`no`) END = teu.task_event_id")
+                .append(" AND teu.tenant_id = te.tenant_id")
                 .append(eventJoinConditions).append(' ');
         }
         sql.append("WHERE d.tenant_id = ? AND COALESCE(d.del_flag,'0') = '0' ")
@@ -1545,79 +1595,21 @@ public class LocationTaskCompatService implements ActiveSafetyEventReportService
         return LocationTaskResult.success(result);
     }
 
-    /**
-     * Schedule the Go AfterCreate automatic-work-order hook after the event commits.
-     */
-    private void scheduleAutomaticWorkOrder(final EventSnapshot event) {
-        final RequestAttributes requestAttributes = RequestContextHolder.getRequestAttributes();
-        if (TransactionSynchronizationManager.isSynchronizationActive()) {
-            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronizationAdapter() {
-                /** Launch the fire-and-forget hook only after the event row is committed. */
-                @Override
-                public void afterCommit() {
-                    launchAutomaticWorkOrder(event, requestAttributes);
-                }
-            });
-            return;
-        }
-        launchAutomaticWorkOrder(event, requestAttributes);
-    }
-
-    /**
-     * Launch the original fire-and-forget work-order hook on a worker thread.
-     */
-    private void launchAutomaticWorkOrder(final EventSnapshot event,
-                                          final RequestAttributes requestAttributes) {
-        CompletableFuture.runAsync(new Runnable() {
-            /** Execute the asynchronous hook while retaining the originating request headers. */
-            @Override
-            public void run() {
-                runAutomaticWorkOrder(event, requestAttributes);
-            }
-        });
-    }
-
-    /**
-     * Find every matching configuration, start its workflow, and save the first success.
-     */
-    private void runAutomaticWorkOrder(EventSnapshot event, RequestAttributes requestAttributes) {
-        RequestAttributes previous = RequestContextHolder.getRequestAttributes();
-        try {
-            if (requestAttributes != null) {
-                RequestContextHolder.setRequestAttributes(requestAttributes);
-            }
-            if (event.pictures.isEmpty()) {
-                return;
-            }
-            List<Map<String, Object>> configurations = automaticWorkOrderConfigurations(event);
-            boolean saved = false;
-            for (Map<String, Object> configuration : configurations) {
-                try {
-                    WorkOrder workflowResult = startWorkflow(event, configuration);
-                    if (!saved) {
-                        Map<String, Object> workOrderData = workflowResult == null
-                            ? new LinkedHashMap<String, Object>()
-                            : objectMapper.convertValue(workflowResult, MAP_TYPE);
-                        jdbc.update("UPDATE " + EVENT
-                                + " SET data = JSON_SET(data,'$.work_order_data',CAST(? AS JSON)),"
-                                + " mod_status = 1, work_order_status = 1, updated_at = NOW()"
-                                + " WHERE id = ? AND `no` = ?",
-                            toJson(workOrderData), event.key.getId(), event.key.getNo());
-                        saved = true;
-                    }
-                } catch (RuntimeException exception) {
-                    LOGGER.warn("Automatic work-order start failed for event {}",
-                        event.key.externalId(), exception);
-                }
-            }
-        } catch (RuntimeException exception) {
-            LOGGER.warn("Automatic work-order lookup failed for event {}", event.key.externalId(), exception);
-        } finally {
-            if (previous == null) {
-                RequestContextHolder.resetRequestAttributes();
-            } else {
-                RequestContextHolder.setRequestAttributes(previous);
-            }
+    /** Save every matching rule and its immutable start request in the event transaction. */
+    private void scheduleAutomaticWorkOrder(EventSnapshot event) {
+        if (event.pictures.isEmpty()) return;
+        int ruleNo = 0;
+        for (Map<String, Object> configuration : automaticWorkOrderConfigurations(event)) {
+            ProcessStartBo request = buildWorkflowRequest(event, configuration, ++ruleNo);
+            boolean valid = event.tenantId.equals(string(configuration.get("tenant_id")))
+                && !string(configuration.get("user_id")).isEmpty()
+                && !request.getProcessDefId().isEmpty() && !request.getAppId().isEmpty();
+            jdbc.update("INSERT INTO oort_task_event_dispatch "
+                    + "(request_id,tenant_id,event_id,event_no,rule_no,actor_id,process_definition_id,"
+                    + "start_payload,dispatch_status,last_error) VALUES (?,?,?,?,?,?,?,CAST(? AS JSON),?,?)",
+                request.getRequestId(), event.tenantId, event.key.getId(), event.key.getNo(), ruleNo,
+                valid ? string(configuration.get("user_id")) : "", request.getProcessDefId(), toJson(request),
+                valid ? "PENDING" : "INVALID", valid ? null : "流程配置不完整或租户不匹配");
         }
     }
 
@@ -1823,14 +1815,10 @@ public class LocationTaskCompatService implements ActiveSafetyEventReportService
     /**
      * Start one configured workflow using the same variables sent by the Go service.
      */
-    private WorkOrder startWorkflow(EventSnapshot event, Map<String, Object> configuration) {
-        String tenantId = string(configuration.get("tenant_id"));
-        String userId = string(configuration.get("user_id"));
+    private ProcessStartBo buildWorkflowRequest(EventSnapshot event, Map<String, Object> configuration, int ruleNo) {
+        String tenantId = event.tenantId;
         String processId = string(configuration.get("process_id"));
         String appId = string(configuration.get("app_id"));
-        if (tenantId.isEmpty() || userId.isEmpty() || processId.isEmpty() || appId.isEmpty()) {
-            throw new IllegalArgumentException("没有获取到流程中心的配置参数");
-        }
 
         Map<String, Object> persistedEvent = firstRow("SELECT created_at FROM " + EVENT
                 + " WHERE BINARY tenant_id = BINARY ? AND BINARY id = BINARY ? AND `no` = ? AND deleted_at = 0 LIMIT 1",
@@ -1859,21 +1847,16 @@ public class LocationTaskCompatService implements ActiveSafetyEventReportService
         ProcessStartBo request = new ProcessStartBo();
         request.setProcessDefId(processId);
         request.setRequestId(java.util.UUID.nameUUIDFromBytes((tenantId + "\u0000" + event.key.externalId()
-            + "\u0000" + processId + "\u0000" + toJson(configuration)).getBytes(java.nio.charset.StandardCharsets.UTF_8)).toString());
+            + "\u0000" + processId + "\u0000" + ruleNo + "\u0000" + toJson(configuration))
+            .getBytes(StandardCharsets.UTF_8)).toString());
         request.setAutoGetFormFlag(true);
         request.setAppId(appId);
-        request.setEventName(event.name);
+        request.setEventName(event.name.isEmpty() ? event.key.externalId() : event.name);
         request.setWorkOrderBo(workOrder);
         request.setFrontFlag(true);
         request.setVariables(variables);
 
-        SysUser workflowUser = new SysUser();
-        workflowUser.setTenantId(tenantId);
-        workflowUser.setUserId(userId);
-        workflowUser.setUserName(userId);
-        workflowUser.setLoginId(userId);
-        processService.startVerifiedEventWorkOrder(request, workflowUser);
-        return request.getWorkOrder();
+        return request;
     }
 
     /**
@@ -2297,6 +2280,11 @@ public class LocationTaskCompatService implements ActiveSafetyEventReportService
     }
 
     private Map<String, Object> toEvent(Map<String, Object> row, Map<String, String> pictureUrls) {
+        return toEvent(row, pictureUrls, null);
+    }
+
+    private Map<String, Object> toEvent(Map<String, Object> row, Map<String, String> pictureUrls,
+                                        Map<String, List<Map<String, Object>>> executors) {
         String rawId = string(row.get("id"));
         long no = number(row.get("no")).longValue();
         String externalId = no == 0L ? rawId : rawId + "-" + no;
@@ -2341,7 +2329,8 @@ public class LocationTaskCompatService implements ActiveSafetyEventReportService
         value.put("status", number(row.get("status")).intValue());
         value.put("item", item);
         value.put("client", string(row.get("client")));
-        value.put("uuids", eventUsers(externalId));
+        value.put("uuids", executors == null ? eventUsers(externalId)
+            : executors.getOrDefault(externalId, Collections.<Map<String, Object>>emptyList()));
         value.put("mod_type", number(row.get("mod_type")).intValue());
         value.put("mod_status", number(row.get("mod_status")).intValue());
         appendIfNotEmpty(value, "device_id", row.get("device_id"));
@@ -2441,6 +2430,47 @@ public class LocationTaskCompatService implements ActiveSafetyEventReportService
     /**
      * Load the executor array returned inside each event.
      */
+    /**
+     * Load executors for a whole page in one query, grouped by the event's external number.
+     *
+     * <p>Rows keep the legacy {@code id-no} key even when {@code no} is zero, so grouping uses the
+     * same concatenation the per-row query used.
+     */
+    private Map<String, List<Map<String, Object>>> eventUsers(List<Map<String, Object>> events) {
+        Map<String, List<Map<String, Object>>> grouped = new LinkedHashMap<String, List<Map<String, Object>>>();
+        if (events == null || events.isEmpty()) {
+            return grouped;
+        }
+        List<String> keys = new ArrayList<String>();
+        for (Map<String, Object> event : events) {
+            String id = string(event.get("id"));
+            if (!id.isEmpty()) {
+                long no = number(event.get("no")).longValue();
+                String key = no == 0L ? id : id + "-" + no;
+                keys.add(key);
+                grouped.put(key, new ArrayList<Map<String, Object>>());
+            }
+        }
+        if (keys.isEmpty()) {
+            return grouped;
+        }
+        List<Map<String, Object>> rows = jdbc.queryForList(
+            "SELECT task_event_id,uuid,u_type FROM " + EVENT_USER
+                + " WHERE task_event_id IN (" + placeholders(keys.size()) + ") ORDER BY created_at ASC",
+            keys.toArray());
+        for (Map<String, Object> row : rows) {
+            List<Map<String, Object>> owners = grouped.get(string(row.get("task_event_id")));
+            if (owners == null) {
+                continue;
+            }
+            LinkedHashMap<String, Object> executor = new LinkedHashMap<String, Object>();
+            executor.put("uuid", string(row.get("uuid")));
+            executor.put("u_type", number(row.get("u_type")).intValue());
+            owners.add(executor);
+        }
+        return grouped;
+    }
+
     private List<Map<String, Object>> eventUsers(String eventId) {
         List<Map<String, Object>> rows = jdbc.queryForList(
             "SELECT uuid,u_type FROM " + EVENT_USER + " WHERE task_event_id = ? ORDER BY created_at ASC",
@@ -2483,9 +2513,11 @@ public class LocationTaskCompatService implements ActiveSafetyEventReportService
 
     private Map<String, Object> findEventRaw(String externalId, String tenantId) {
         EventKey key = EventKey.parse(externalId);
-        return firstRow("SELECT * FROM " + EVENT
+        Map<String, Object> event = firstRow("SELECT * FROM " + EVENT
                 + " WHERE id = ? AND `no` = ? AND tenant_id = ? AND deleted_at = 0 LIMIT 1",
             key.getId(), key.getNo(), tenantId);
+        // The legacy table uses a case-insensitive collation; the session tenant is an exact identifier.
+        return event != null && string(event.get("tenant_id")).equals(tenantId) ? event : null;
     }
 
     /**
@@ -2504,10 +2536,13 @@ public class LocationTaskCompatService implements ActiveSafetyEventReportService
         List<Map<String, Object>> rows = jdbc.queryForList(
             "SELECT te.*" + from + condition + " ORDER BY te.created_at DESC LIMIT ? OFFSET ?",
             queryArgs.toArray());
+        // One executor lookup for the whole page. The previous per-row call issued a query for
+        // every event, including events without executors, which dominated list latency.
+        Map<String, List<Map<String, Object>>> users = eventUsers(rows);
         List<Map<String, Object>> list = new ArrayList<Map<String, Object>>();
         Map<String, String> pictureUrls = pagePictureUrls(rows, tenantId);
         for (Map<String, Object> row : rows) {
-            list.add(toEvent(row, pictureUrls));
+            list.add(toEvent(row, pictureUrls, users));
         }
         if (eventLocationService != null) eventLocationService.enrich(list, tenantId, verifiedToken);
         return pagePayload(page, pageSize, count == null ? 0L : count, list);
@@ -2544,12 +2579,35 @@ public class LocationTaskCompatService implements ActiveSafetyEventReportService
     }
 
     /**
-     * Build the next event composite key using the original daily per-user sequence.
+     * Build the next event composite key using the original daily per-user scope.
+     *
+     * <p>The old COUNT(*)+1 allocation handed the same number to two concurrent writers because
+     * both counted before either inserted; the composite primary key then rejected one of two
+     * legitimate events. Allocation now bumps a dedicated scope row atomically, so concurrent
+     * inserts always receive distinct numbers while historical series continue from their max.
      */
     private EventKey nextEventKey(String userName) {
-        String prefix = eventIdPrefix(userName) + "-" + new SimpleDateFormat("yyyyMMdd", Locale.ROOT).format(new Date());
-        Long count = jdbc.queryForObject("SELECT COUNT(*) FROM " + EVENT + " WHERE id = ?", Long.class, prefix);
-        return new EventKey(prefix, (count == null ? 0L : count) + 1L);
+        String scope = eventIdPrefix(userName) + "-" + new SimpleDateFormat("yyyyMMdd", Locale.ROOT).format(new Date());
+        return new EventKey(scope, allocateEventNumber(scope));
+    }
+
+    /**
+     * Hand out the next number for one event-number scope without a read/compute/write race.
+     *
+     * <p>The read is a locking read on purpose. MySQL defaults to REPEATABLE READ, where a plain
+     * SELECT keeps the snapshot taken at the first statement, so a retry after a lost compare-and-set
+     * would keep seeing the stale value and never succeed. A locking read always returns the latest
+     * committed row and holds that row until the surrounding transaction ends, so concurrent
+     * callers serialize on one counter. The allocation is a single row, so the wait is short.
+     */
+    private long allocateEventNumber(String scope) {
+        if (!TransactionSynchronizationManager.isActualTransactionActive()) {
+            throw new IllegalStateException("Event numbers must be allocated in the event transaction");
+        }
+        jdbc.update("INSERT INTO oort_task_event_number_scope (scope,last_no,updated_at) VALUES (?,1,NOW())"
+            + " ON DUPLICATE KEY UPDATE last_no=last_no+1,updated_at=NOW()", scope);
+        return jdbc.queryForObject("SELECT last_no FROM oort_task_event_number_scope WHERE scope=? FOR UPDATE",
+            Long.class, scope);
     }
 
     /**

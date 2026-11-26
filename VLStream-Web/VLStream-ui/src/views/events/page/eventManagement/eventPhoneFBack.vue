@@ -94,7 +94,7 @@
         </el-tabs>
         <div class="feedbacklist">
           <FeedbackRecord v-if="activeIndex === '1'" :feedback-list-data="feedbackListData" />
-          <WorkOrderRecord v-if="activeIndex === '2'" :item="eventDetailData" />
+          <EventWorkOrders v-if="activeIndex === '2'" :item="eventDetailData" @refresh="getEventDetail()" />
         </div>
         <el-pagination
           v-if="activeIndex === '1' && feedbackTotal > feedbackPageSize"
@@ -120,7 +120,7 @@ import { ref, computed, watch } from 'vue'
 import MultiImageUpload from './components/multiImageUpload.vue'
 import CommonExpressions from '@/components/commonExpressions.vue'
 import FeedbackRecord from './components/eventDetailsDialog/feedbackRecord.vue'
-import WorkOrderRecord from './components/eventDetailsDialog/workOrderRecord.vue'
+import EventWorkOrders from './components/eventDetailsDialog/EventWorkOrders.vue'
 import { eventDetail, addFeedback, addWorkOrderFeedback, feedbackList } from '@/api/smartCity/events'
 import { AuthManager } from '@/utils/auth'
 import { useUserStore } from '@/store/modules/useraPaas'
@@ -200,25 +200,31 @@ const selectContent = (content) => {
 }
 
 const eventDetailData = ref<EventDetailData>({})
+let detailRequest = 0
 
 // Load event ; interface null / empty , not Process dialog .
 const getEventDetail = async() => {
+  const request = ++detailRequest
+  const identity = auth.getIdentitySnapshot()
   const params = {
     id: props.data.id,
     accessToken: store.token
   }
+  const isCurrent = () => request === detailRequest && props.visible && props.data?.id === params.id
+    && auth.isIdentityCurrent(identity)
   try {
     const res: any = await eventDetail(params)
-    if (res.code === 200) {
+    if (isCurrent() && res.code === 200 && String(res.data?.id) === String(params.id)) {
       eventDetailData.value = res.data
     }
   } catch (error) {
-    eventDetailData.value = {}
+    if (isCurrent()) eventDetailData.value = {}
   }
 }
 
 // dataInitialize
 watch([() => props.visible, () => props.data], ([newVisible, newData]) => {
+  detailRequest++
   if (newVisible && newData) {
     formData.value = initFormData()
     formData.value.id = newData.id

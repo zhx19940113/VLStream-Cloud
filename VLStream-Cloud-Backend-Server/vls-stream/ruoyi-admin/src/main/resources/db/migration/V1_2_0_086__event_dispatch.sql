@@ -1,0 +1,23 @@
+CREATE TABLE oort_task_event_dispatch (
+    request_id CHAR(36) NOT NULL,
+    tenant_id VARCHAR(64) NOT NULL,
+    event_id VARCHAR(64) NOT NULL,
+    event_no INT NOT NULL,
+    rule_no INT NOT NULL,
+    actor_id VARCHAR(64) NOT NULL,
+    process_definition_id VARCHAR(255) NOT NULL,
+    start_payload JSON NOT NULL,
+    dispatch_status VARCHAR(16) NOT NULL,
+    attempts INT NOT NULL DEFAULT 0,
+    next_attempt_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    proc_inst_id VARCHAR(64),
+    work_order_id VARCHAR(64),
+    result_status VARCHAR(32),
+    result_data JSON,
+    last_error VARCHAR(512),
+    updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+    PRIMARY KEY (request_id),
+    UNIQUE KEY uk_event_rule (tenant_id,event_id,event_no,rule_no),
+    UNIQUE KEY uk_dispatch_instance (tenant_id,proc_inst_id),
+    KEY ix_dispatch_due (dispatch_status,next_attempt_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;

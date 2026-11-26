@@ -119,7 +119,7 @@ test('feedback is submitted only after a requested work order is confirmed', asy
     .replace(/^import\s[\s\S]*?from\s+["'][^"']+["'];\s*$/gm, '').replace(/export\s*\{[^}]+\};?\s*$/m, '')
   const build = new Function('__deps', `
     const {_defineComponent, uiText, ref, computed, watch, MultiImageUpload, CommonExpressions,
-      FeedbackRecord, WorkOrderRecord, eventDetail, addFeedback, addWorkOrderFeedback, feedbackList, useUserStore,
+      FeedbackRecord, EventWorkOrders, eventDetail, addFeedback, addWorkOrderFeedback, feedbackList, useUserStore,
       ElMessage, FlowForm, AuthManager} = __deps;
     ${feedbackJs}
     return stdin_default;
@@ -128,7 +128,7 @@ test('feedback is submitted only after a requested work order is confirmed', asy
   let current = true
   const component = build({
     _defineComponent: value => value, uiText: value => value, ref: value => ({ value }), computed: value => value,
-    watch() {}, MultiImageUpload: {}, CommonExpressions: {}, FeedbackRecord: {}, WorkOrderRecord: {}, FlowForm: {},
+    watch() {}, MultiImageUpload: {}, CommonExpressions: {}, FeedbackRecord: {}, EventWorkOrders: {}, FlowForm: {},
     eventDetail: async () => ({}), feedbackList: async () => ({ code: 200, data: { list: [] } }),
     addFeedback: async body => { submitted.push({ ...body }); return { code: 200 } },
     addWorkOrderFeedback: async (body, identity, guard) => { guard(); submitted.push({ ...body }); return { code: 200 } },

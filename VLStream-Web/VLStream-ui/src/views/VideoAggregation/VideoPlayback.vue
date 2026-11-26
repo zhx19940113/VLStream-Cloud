@@ -79,7 +79,7 @@ const tableDevices = computed(() => visibleDevices.value.filter(item => (!focuse
 const pageDevices = computed(() => tableDevices.value.slice((page.value - 1) * pageSize.value, page.value * pageSize.value))
 function filterDevice(value) { focusedDeviceId.value = value.id; device.value = value; page.value = 1 }
 function changeCategory(ids) { categoryIds.value = ids; focusedDeviceId.value = null; page.value = 1 }
-function closePlayer() { generation++; clearMedia(); posters.value = {} }
+function closePlayer() { generation++; clearMedia(); fileRequests.clear(); posters.value = {} }
 
 const devices = ref([]), device = ref(null), search = ref(''), categoryIds = ref(null)
 const catalogError = ref(''), error = ref(''), loading = ref(false), loadingMedia = ref(false)
@@ -108,12 +108,14 @@ function capturePoster() {
   } catch { /* Thumbnail failure must not interrupt playback. */ }
 }
 async function warmPosters(items, ticket) {
-  // Bound background downloads to the first three clips; never prefetch an entire day.
-  for (const item of items.slice(0, 3)) {
+  // The player already fetches the first clip. Requesting it again here cost a second full
+  // MP4 download per open (`no-store` prevents reuse), so the first clip is skipped and its
+  // poster is taken from the frame the player decoded instead.
+  for (const item of items.slice(1, 3)) {
     if (disposed || ticket !== generation || !playerOpen.value) return
     let objectUrl, preview
     try {
-      const blob = await api.file(item.id)
+      const blob = await requestFile(item.id)
       if (disposed || ticket !== generation || !playerOpen.value) return
       objectUrl = URL.createObjectURL(blob)
       preview = document.createElement('video'); preview.muted = true; preview.preload = 'auto'
@@ -141,6 +143,17 @@ const dayStart = computed(() => new Date(`${date.value}T00:00:00+08:00`).getTime
 watch([listSearch, search, pageSize], () => { page.value = 1 })
 watch(tableDevices, values => { page.value = Math.min(page.value, Math.max(1, Math.ceil(values.length / pageSize.value))) })
 let generation = 0, mediaGeneration = 0, catalogGeneration = 0, disposed = false, poll, autoPlay = false, polling = false
+// One in-flight request per clip, shared by the poster prefetcher and the player. The file
+// response is no-store, so a second call would be a second full download, not a cache hit.
+const fileRequests = new Map()
+function requestFile(id) {
+  if (!fileRequests.has(id)) {
+    const request = api.file(id)
+    request.catch(() => {}).then(() => { if (fileRequests.get(id) === request) fileRequests.delete(id) })
+    fileRequests.set(id, request)
+  }
+  return fileRequests.get(id)
+}
 const clock = time => new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(new Date(Number(time)))
 const range = segment => `${clock(segment.start_ms)} – ${clock(segment.end_ms)}`
 function segmentStyle(segment) {
@@ -163,7 +176,7 @@ async function loadCatalog() {
 }
 async function selectDevice(value, preferred) { device.value = value; playerOpen.value = true; posters.value = {}; sourceKey.value = typeof preferred === 'string' ? preferred : key(value.sources[0]); await loadSources() }
 async function loadSources() {
-  const ticket = ++generation; clearMedia(); segments.value = []; sources.value = []; sourceId.value = ''; error.value = ''
+  const ticket = ++generation; clearMedia(); fileRequests.clear(); segments.value = []; sources.value = []; sourceId.value = ''; error.value = ''
   if (!source.value) return
   loading.value = true
   try {
@@ -175,7 +188,7 @@ async function loadSources() {
   finally { if (ticket === generation) loading.value = false }
 }
 async function loadSegments() {
-  const ticket = ++generation; clearMedia(); segments.value = []; error.value = ''; loading.value = false
+  const ticket = ++generation; clearMedia(); fileRequests.clear(); segments.value = []; error.value = ''; loading.value = false
   if (!sourceId.value || !date.value) return
   loading.value = true
   try {
@@ -190,7 +203,7 @@ async function loadSegments() {
 async function play(segment, shouldPlay = true) {
   clearMedia(); const ticket = mediaGeneration; loadingMedia.value = true; error.value = ''; autoPlay = shouldPlay
   try {
-    const blob = await api.file(segment.id)
+    const blob = await requestFile(segment.id)
     if (disposed || ticket !== mediaGeneration) return
     if (!(blob instanceof Blob) || blob.type.includes('json')) throw new Error(t('录像文件不可用'))
     url.value = URL.createObjectURL(blob); active.value = segment; currentTime.value = clock(segment.start_ms)
@@ -198,7 +211,7 @@ async function play(segment, shouldPlay = true) {
   finally { if (ticket === mediaGeneration) loadingMedia.value = false }
 }
 function setSpeed() { if (video.value) video.value.playbackRate = speed.value }
-function mediaReady() { setSpeed(); if (autoPlay) video.value?.play().catch(() => {}) }
+function mediaReady() { capturePoster(); setSpeed(); if (autoPlay) video.value?.play().catch(() => {}) }
 function updateTime() {
   if (active.value) {
     currentTime.value = clock(Number(active.value.start_ms) + (video.value?.currentTime || 0) * 1000)

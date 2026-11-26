@@ -222,7 +222,18 @@ public class DataManagementService {
     }
 
     public Map<String, Object> detail(Long projectId, Long id) {
-        return sampleView(sample(projectId, id), instances.selectList(scope(projectId)), labels.selectList(scope(projectId)));
+        AnnotationImage target = sample(projectId, id);
+        // Only this sample's annotations are needed; loading the whole project and filtering in
+        // memory made opening one image scale with the size of the dataset.
+        return sampleView(target, instancesFor(projectId, Collections.singletonList(target.getId())),
+            labels.selectList(scope(projectId)));
+    }
+
+    /** Load annotations for a bounded set of images in one query. */
+    private List<AnnotationInstance> instancesFor(Long projectId, List<Long> imageIds) {
+        if (imageIds == null || imageIds.isEmpty()) return Collections.emptyList();
+        return instances.selectList(this.<AnnotationInstance>scope(projectId)
+            .in("image_id", imageIds).orderByAsc("id"));
     }
 
     private Map<String, Object> sampleView(AnnotationImage sample, List<AnnotationInstance> annotations, List<AnnotationLabel> projectLabels) {
@@ -423,7 +434,8 @@ public class DataManagementService {
     public List<Map<String, Object>> review(Long projectId, int count) {
         project(projectId);
         List<AnnotationImage> selected = samples.selectList(this.<AnnotationImage>scope(projectId).ne("quality_status", "excluded").last("ORDER BY RAND() LIMIT " + Math.max(1, Math.min(50, count))));
-        List<AnnotationInstance> annotations = instances.selectList(scope(projectId));
+        List<Long> selectedIds = selected.stream().map(AnnotationImage::getId).collect(Collectors.toList());
+        List<AnnotationInstance> annotations = instancesFor(projectId, selectedIds);
         List<AnnotationLabel> projectLabels = labels.selectList(scope(projectId));
         return selected.stream().map(s -> sampleView(s, annotations, projectLabels)).collect(Collectors.toList());
     }
@@ -541,11 +553,14 @@ public class DataManagementService {
         DatasetSnapshot after = to == null ? snapshot(projectId) : readSnapshot(version(projectId, to).getSnapshotJson());
         Map<Long, AnnotationImage> left = before.getSamples().stream().collect(Collectors.toMap(AnnotationImage::getId, Function.identity()));
         Map<Long, AnnotationImage> right = after.getSamples().stream().collect(Collectors.toMap(AnnotationImage::getId, Function.identity()));
+        Map<Long, List<String>> leftSignatures = instanceSignatures(before);
+        Map<Long, List<String>> rightSignatures = instanceSignatures(after);
         List<Map<String, Object>> added = new ArrayList<>(), removed = new ArrayList<>(), changed = new ArrayList<>();
         for (AnnotationImage sample : after.getSamples()) {
             if (!left.containsKey(sample.getId())) added.add(map("id", String.valueOf(sample.getId()), "name", sample.getImageName()));
             else {
-                List<String> fields = changedFields(left.get(sample.getId()), sample, before, after);
+                List<String> fields = changedFields(left.get(sample.getId()), sample,
+                    leftSignatures, rightSignatures);
                 if (!fields.isEmpty()) changed.add(map("id", String.valueOf(sample.getId()), "name", sample.getImageName(), "fields", fields,
                     "beforeSplit", left.get(sample.getId()).getDatasetSplit(), "afterSplit", sample.getDatasetSplit()));
             }
@@ -556,7 +571,9 @@ public class DataManagementService {
             "labelsChanged", !semanticLabels(before).equals(semanticLabels(after)), "before", statistics(before), "after", statistics(after));
     }
 
-    private List<String> changedFields(AnnotationImage before, AnnotationImage after, DatasetSnapshot left, DatasetSnapshot right) {
+    private List<String> changedFields(AnnotationImage before, AnnotationImage after,
+                                       Map<Long, List<String>> leftSignatures,
+                                       Map<Long, List<String>> rightSignatures) {
         List<String> changes = new ArrayList<>();
         if (!Objects.equals(before.getImageName(), after.getImageName())) changes.add("名称");
         if (!Objects.equals(before.getSampleSource(), after.getSampleSource())) changes.add("来源");
@@ -565,14 +582,25 @@ public class DataManagementService {
             || !Objects.equals(before.getQualityIssues(), after.getQualityIssues())) changes.add("质量");
         if (!Objects.equals(before.getDatasetSplit(), after.getDatasetSplit())) changes.add("数据集划分");
         if (!Objects.equals(before.getContentSha256(), after.getContentSha256()) || !Objects.equals(before.getLocalPath(), after.getLocalPath())) changes.add("文件");
-        if (!semanticInstances(left, before.getId()).equals(semanticInstances(right, after.getId()))) changes.add("标注内容");
+        if (!Objects.equals(leftSignatures.get(before.getId()), rightSignatures.get(after.getId()))) changes.add("标注内容");
         return changes;
     }
 
-    private List<String> semanticInstances(DatasetSnapshot snapshot, Long id) {
-        return snapshot.getInstances().stream().filter(i -> Objects.equals(id, i.getImageId()))
-            .map(i -> writeJson(Arrays.asList(i.getLabelId(), i.getAnnotationType(), i.getAnnotationData(), i.getVerified(), i.getConfidence())))
-            .sorted().collect(Collectors.toList());
+    /**
+     * Group each image's annotation signatures once. Rescanning both snapshots per shared image
+     * cost roughly {@code sharedImages x totalInstances} comparisons; grouping is linear in the
+     * annotation count and keeps the exact same sorted-signature semantics.
+     */
+    private Map<Long, List<String>> instanceSignatures(DatasetSnapshot snapshot) {
+        Map<Long, List<String>> grouped = new HashMap<>();
+        for (AnnotationInstance instance : snapshot.getInstances()) {
+            if (instance.getImageId() == null) continue;
+            grouped.computeIfAbsent(instance.getImageId(), key -> new ArrayList<>()).add(writeJson(
+                Arrays.asList(instance.getLabelId(), instance.getAnnotationType(), instance.getAnnotationData(),
+                    instance.getVerified(), instance.getConfidence())));
+        }
+        for (List<String> signatures : grouped.values()) Collections.sort(signatures);
+        return grouped;
     }
 
     private List<String> semanticLabels(DatasetSnapshot snapshot) {

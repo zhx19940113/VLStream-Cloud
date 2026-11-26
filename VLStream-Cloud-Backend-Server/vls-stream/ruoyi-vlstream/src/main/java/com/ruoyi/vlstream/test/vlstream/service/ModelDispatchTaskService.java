@@ -89,52 +89,61 @@ public class ModelDispatchTaskService {
 
 	public boolean applyHardwareReply(String sourceMsgId, String requestId, String deviceId,
 		String status, String fileSha256, String classFileSha256, String message, String rawPayload) {
-		ModelDispatchTask task = getByRequestId(requestId);
-		if (task == null
-			|| !StringUtils.equals(task.getMqttMessageId(), sourceMsgId)
-			|| !StringUtils.equals(task.getDeviceId(), deviceId)) {
-			return false;
-		}
-
 		String normalizedStatus = normalizeHardwareStatus(status);
 		if (normalizedStatus == null) {
 			return false;
 		}
-		if ("SUCCESS".equals(normalizedStatus)
-			&& !StringUtils.equalsIgnoreCase(task.getSha256(), StringUtils.trimToEmpty(fileSha256))) {
-			normalizedStatus = "FAILED";
-			message = "Device model SHA-256 mismatch: expected=" + task.getSha256()
-				+ ", actual=" + StringUtils.defaultIfBlank(fileSha256, "empty");
+		// A reply can lose the race against a concurrent progress update: both read the same old
+		// status, so a conditional update on that stale value affects zero rows. Re-read the row and
+		// let the state machine decide again from the newest status. Identity and digest checks run
+		// against every fresh copy, so a retry can never accept a mismatched message.
+		for (int attempt = 0; attempt < 3; attempt++) {
+			ModelDispatchTask task = getByRequestId(requestId);
+			if (task == null
+				|| !StringUtils.equals(task.getMqttMessageId(), sourceMsgId)
+				|| !StringUtils.equals(task.getDeviceId(), deviceId)) {
+				return false;
+			}
+			String outcome = normalizedStatus;
+			String outcomeMessage = message;
+			if ("SUCCESS".equals(outcome)
+				&& !StringUtils.equalsIgnoreCase(task.getSha256(), StringUtils.trimToEmpty(fileSha256))) {
+				outcome = "FAILED";
+				outcomeMessage = "Device model SHA-256 mismatch: expected=" + task.getSha256()
+					+ ", actual=" + StringUtils.defaultIfBlank(fileSha256, "empty");
+			} else if ("SUCCESS".equals(outcome) && StringUtils.isNotBlank(task.getClassFileSha256())
+				&& !StringUtils.equalsIgnoreCase(task.getClassFileSha256(), StringUtils.trimToEmpty(classFileSha256))) {
+				outcome = "FAILED";
+				outcomeMessage = "Device class file SHA-256 mismatch or missing";
+			}
+			if (!canApplyHardwareStatus(task.getDispatchStatus(), outcome)) {
+				return true;
+			}
+			if ("SUCCESS".equals(task.getDispatchStatus()) || "FAILED".equals(task.getDispatchStatus())) return true;
+			Date now = new Date();
+			LambdaUpdateWrapper<ModelDispatchTask> update = new LambdaUpdateWrapper<ModelDispatchTask>()
+				.eq(ModelDispatchTask::getRequestId, requestId)
+				.eq(ModelDispatchTask::getDispatchStatus, task.getDispatchStatus())
+				.set(ModelDispatchTask::getDispatchStatus, outcome)
+				.set(ModelDispatchTask::getLastReplyAt, now)
+				.set(ModelDispatchTask::getReplyPayload, StringUtils.abbreviate(rawPayload, 8000))
+				.set(ModelDispatchTask::getFailureReason,
+					"FAILED".equals(outcome) ? StringUtils.abbreviate(outcomeMessage, 2000) : null);
+			if ("FAILED".equals(outcome)) {
+				update.ne(ModelDispatchTask::getDispatchStatus, "SUCCESS");
+			} else if ("SUCCESS".equals(outcome)) {
+				update.ne(ModelDispatchTask::getDispatchStatus, "FAILED");
+			} else {
+				update.notIn(ModelDispatchTask::getDispatchStatus, "SUCCESS", "FAILED");
+			}
+			if ("SUCCESS".equals(outcome)) {
+				update.set(ModelDispatchTask::getDeployedAt, now);
+			}
+			if (taskMapper.update(null, update) > 0) {
+				return true;
+			}
 		}
-		if ("SUCCESS".equals(normalizedStatus) && StringUtils.isNotBlank(task.getClassFileSha256())
-			&& !StringUtils.equalsIgnoreCase(task.getClassFileSha256(), StringUtils.trimToEmpty(classFileSha256))) {
-			normalizedStatus = "FAILED";
-			message = "Device class file SHA-256 mismatch or missing";
-		}
-		if (!canApplyHardwareStatus(task.getDispatchStatus(), normalizedStatus)) {
-			return true;
-		}
-        if ("SUCCESS".equals(task.getDispatchStatus()) || "FAILED".equals(task.getDispatchStatus())) return true;
-		Date now = new Date();
-		LambdaUpdateWrapper<ModelDispatchTask> update = new LambdaUpdateWrapper<ModelDispatchTask>()
-			.eq(ModelDispatchTask::getRequestId, requestId)
-			.eq(ModelDispatchTask::getDispatchStatus, task.getDispatchStatus())
-			.set(ModelDispatchTask::getDispatchStatus, normalizedStatus)
-			.set(ModelDispatchTask::getLastReplyAt, now)
-			.set(ModelDispatchTask::getReplyPayload, StringUtils.abbreviate(rawPayload, 8000))
-			.set(ModelDispatchTask::getFailureReason,
-				"FAILED".equals(normalizedStatus) ? StringUtils.abbreviate(message, 2000) : null);
-		if ("FAILED".equals(normalizedStatus)) {
-			update.ne(ModelDispatchTask::getDispatchStatus, "SUCCESS");
-		} else if ("SUCCESS".equals(normalizedStatus)) {
-			update.ne(ModelDispatchTask::getDispatchStatus, "FAILED");
-		} else {
-			update.notIn(ModelDispatchTask::getDispatchStatus, "SUCCESS", "FAILED");
-		}
-		if ("SUCCESS".equals(normalizedStatus)) {
-			update.set(ModelDispatchTask::getDeployedAt, now);
-		}
-		return taskMapper.update(null, update) > 0;
+		return false;
 	}
 
 	private void updateStatus(String requestId, String status, String failureReason, String replyPayload,

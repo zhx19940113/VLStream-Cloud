@@ -268,7 +268,7 @@ public class WfProcessController extends BaseController {
         SysUser user = RedisUtils.getCacheObject(AuthorizationInterceptor.getToken());
         if (user == null) throw new com.ruoyi.common.exception.ServiceException("用户身份不存在");
         workflowOwnership.requireCurrentTenant(user.getTenantId());
-        String instance = processService.startVerifiedEventWorkOrder(request, user);
+        String instance = processService.startManualEventWorkOrder(request, user);
         Map<String, Object> result = new HashMap<>();
         result.put("ProcessInstanceId", instance);
         result.put("TaskId", request.getWorkOrder().getTaskId());

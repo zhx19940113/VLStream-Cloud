@@ -163,9 +163,17 @@ public class CloudDeviceWorker {
             log.warn("Cloud AI reconciliation {} at {}: {} origin={}", id, phase, error.getClass().getSimpleName(),
                 error.getStackTrace().length == 0 ? "unknown" : error.getStackTrace()[0].toString());
         } finally {
-            if (previous == null) TenantContextHolder.clear(); else TenantContextHolder.setTenantId(previous);
-            jdbc.update("UPDATE vls_cloud_device_run SET lease_owner=NULL,lease_until=? WHERE id=? AND lease_owner=?", System.currentTimeMillis()+5000, id, worker);
+            // The local slot belongs to this process, not to the database lease. Release it
+            // unconditionally so a failing cleanup statement can never pin a worker forever.
             active.remove(id);
+            if (previous == null) TenantContextHolder.clear(); else TenantContextHolder.setTenantId(previous);
+            try {
+                jdbc.update("UPDATE vls_cloud_device_run SET lease_owner=NULL,lease_until=? WHERE id=? AND lease_owner=?", System.currentTimeMillis()+5000, id, worker);
+            } catch (RuntimeException cleanupError) {
+                // The row keeps this worker as owner until its lease expires. A later scan may then
+                // re-lease it and reconcile the remote process instead of starting a duplicate one.
+                log.warn("Cloud device lease cleanup deferred: runId={}, error={}", id, cleanupError.getClass().getSimpleName());
+            }
         }
     }
 

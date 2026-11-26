@@ -29,6 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -63,6 +64,7 @@ class EventReportOutboxWorkerTest {
 		task.setRetryCount(0);
 		when(mapper.claimBatch(anyString(), any(Date.class), any(Date.class), anyInt())).thenReturn(1);
 		when(mapper.selectClaimed(anyString())).thenReturn(Collections.singletonList(task));
+		when(mapper.countOwned(any(), anyString(), anyString(), any(Date.class))).thenReturn(1);
 		doThrow(new IllegalStateException("downstream unavailable"))
 			.when(client).report(any(), anyString());
 
@@ -89,6 +91,7 @@ class EventReportOutboxWorkerTest {
 		EventReportOutbox task = task("tenant-a");
 		when(mapper.claimBatch(anyString(), any(), any(), anyInt())).thenReturn(1);
 		when(mapper.selectClaimed(anyString())).thenReturn(Collections.singletonList(task));
+		when(mapper.countOwned(any(), anyString(), anyString(), any(Date.class))).thenReturn(1);
 		when(media.getPrivateViewUrl(anyString(), anyInt())).thenAnswer(call -> {
 			assertEquals("tenant-a", TenantContextHolder.getTenantId());
 			return "https://media.invalid/" + call.getArgument(0);
@@ -135,5 +138,68 @@ class EventReportOutboxWorkerTest {
 		Field field = target.getClass().getDeclaredField(name);
 		field.setAccessible(true);
 		field.set(target, value);
+	}
+
+	@Test
+	void claimsOnlyWhatOneLeaseWindowCanDeliver() throws Exception {
+		EventReportOutboxMapper mapper = mock(EventReportOutboxMapper.class);
+		EventReportDeliveryStateService stateService = mock(EventReportDeliveryStateService.class);
+		ThirdPartyEventReportClient client = mock(ThirdPartyEventReportClient.class);
+		DeviceMediaUploadService mediaService = mock(DeviceMediaUploadService.class);
+		VlsEventReportProperties properties = new VlsEventReportProperties();
+		properties.setBatchSize(50);
+		properties.setStaleLockMillis(60000L);
+		properties.setTimeoutMillis(5000);
+
+		EventReportOutboxWorker worker = new EventReportOutboxWorker(
+			mapper, stateService, client, mediaService, properties);
+		setField(worker, "tenantType", "multi");
+		worker.deliverPendingEvents();
+
+		// 60s lease, a tenth reserved for the acknowledgement write, 5s per request.
+		ArgumentCaptor<Integer> limit = ArgumentCaptor.forClass(Integer.class);
+		verify(mapper).claimBatch(anyString(), any(Date.class), any(Date.class), limit.capture());
+		assertEquals(10, limit.getValue().intValue());
+	}
+
+	@Test
+	void aRowReclaimedByAnotherInstanceIsNotSentAgain() throws Exception {
+		EventReportOutboxMapper mapper = mock(EventReportOutboxMapper.class);
+		EventReportDeliveryStateService stateService = mock(EventReportDeliveryStateService.class);
+		ThirdPartyEventReportClient client = mock(ThirdPartyEventReportClient.class);
+		DeviceMediaUploadService mediaService = mock(DeviceMediaUploadService.class);
+		VlsEventReportProperties properties = new VlsEventReportProperties();
+		EventReportOutbox task = task("tenant-a");
+		when(mapper.claimBatch(anyString(), any(Date.class), any(Date.class), anyInt())).thenReturn(1);
+		when(mapper.selectClaimed(anyString())).thenReturn(Collections.singletonList(task));
+		when(mapper.countOwned(any(), anyString(), anyString(), any(Date.class))).thenReturn(0);
+
+		EventReportOutboxWorker worker = new EventReportOutboxWorker(
+			mapper, stateService, client, mediaService, properties);
+		setField(worker, "tenantType", "multi");
+		worker.deliverPendingEvents();
+
+		verifyNoInteractions(client);
+		verify(stateService, never()).markSuccess(any(), anyString(), any());
+	}
+
+	@Test
+	void anOwnedRowIsSentWithThePersistedIdempotencyKey() throws Exception {
+		EventReportOutboxMapper mapper = mock(EventReportOutboxMapper.class);
+		EventReportDeliveryStateService stateService = mock(EventReportDeliveryStateService.class);
+		ThirdPartyEventReportClient client = mock(ThirdPartyEventReportClient.class);
+		DeviceMediaUploadService mediaService = mock(DeviceMediaUploadService.class);
+		VlsEventReportProperties properties = new VlsEventReportProperties();
+		EventReportOutbox task = task("tenant-a");
+		when(mapper.claimBatch(anyString(), any(Date.class), any(Date.class), anyInt())).thenReturn(1);
+		when(mapper.selectClaimed(anyString())).thenReturn(Collections.singletonList(task));
+		when(mapper.countOwned(any(), anyString(), anyString(), any(Date.class))).thenReturn(1);
+
+		EventReportOutboxWorker worker = new EventReportOutboxWorker(
+			mapper, stateService, client, mediaService, properties);
+		setField(worker, "tenantType", "multi");
+		worker.deliverPendingEvents();
+
+		verify(client).report(any(), eq(task.getIdempotencyKey()));
 	}
 }
